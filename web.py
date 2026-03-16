@@ -123,36 +123,57 @@ def _index_html(poll_interval_seconds: int) -> str:
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body class="theme-dark">
-  <main>
+  <main class="dashboard-shell">
     <header class="topbar">
-      <div>
+      <div class="title-block">
+        <p class="eyebrow">Local dashboard</p>
         <h1>Claude Usage Tracker</h1>
         <p id="status">Polling every {poll_interval_seconds}s</p>
       </div>
       <div class="controls">
-        <label for="view-mode">View</label>
-        <select id="view-mode">
-          <option value="raw">Raw</option>
-          <option value="clean">Cleaned</option>
-          <option value="smooth">Smoothed</option>
-        </select>
+        <div class="control-field">
+          <label for="view-mode">View</label>
+          <select id="view-mode">
+            <option value="raw">Raw</option>
+            <option value="clean">Cleaned</option>
+            <option value="smooth">Smoothed</option>
+          </select>
+        </div>
 
-        <label for="range-preset">Range</label>
-        <select id="range-preset">
-          <option value="today">Today</option>
-          <option value="weekly_cycle">Since weekly reset</option>
-          <option value="all">All time</option>
-          <option value="manual">Manual zoom</option>
-        </select>
+        <div class="control-field">
+          <label for="range-preset">Range</label>
+          <select id="range-preset">
+            <option value="today">Today</option>
+            <option value="weekly_cycle">Since weekly reset</option>
+            <option value="all">All time</option>
+            <option value="manual">Manual zoom</option>
+          </select>
+        </div>
 
-        <button id="y-reset" title="Reset Y axis zoom (0-100)" aria-label="Reset Y axis zoom (0-100)">⟲</button>
-        <button id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">☀</button>
+        <div class="control-actions">
+          <button id="y-reset" title="Reset Y axis zoom (0-100)" aria-label="Reset Y axis zoom (0-100)">Reset Y</button>
+          <button id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">Light</button>
+        </div>
       </div>
     </header>
 
-    <div id="chart" aria-label="usage chart"></div>
+    <section class="panel chart-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Live usage</p>
+          <h2>Usage history</h2>
+        </div>
+      </div>
+      <div id="chart" aria-label="usage chart"></div>
+    </section>
 
-    <div id="summary-wrap" aria-live="polite">
+    <section id="summary-wrap" class="panel" aria-live="polite">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Current state</p>
+          <h2>Summary</h2>
+        </div>
+      </div>
       <table id="summary-table">
         <thead>
           <tr>
@@ -163,7 +184,7 @@ def _index_html(poll_interval_seconds: int) -> str:
         </thead>
         <tbody id="summary-body"></tbody>
       </table>
-    </div>
+    </section>
   </main>
   <script src="/app.js"></script>
 </body>
@@ -174,94 +195,238 @@ def _index_html(poll_interval_seconds: int) -> str:
 def _app_css() -> str:
     return """
 :root {
-  --bg: #0f1115;
-  --bg-2: #171a20;
-  --card: #151922;
-  --fg: #f3f5f7;
-  --muted: #adb6c2;
-  --line: #2a313d;
+  --bg: #07111b;
+  --bg-2: #132435;
+  --card: rgba(10, 22, 35, 0.84);
+  --card-strong: rgba(15, 32, 49, 0.96);
+  --fg: #f3f6f9;
+  --muted: #9db0c2;
+  --line: rgba(152, 179, 204, 0.18);
+  --accent: #47c0ff;
+  --accent-2: #ff8a4c;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
 }
 body.theme-light {
-  --bg: #f4f7fb;
-  --bg-2: #eaf1f9;
-  --card: #ffffff;
-  --fg: #1d2733;
-  --muted: #5a6a7c;
-  --line: #d8e0ea;
+  --bg: #f2f6fb;
+  --bg-2: #dce8f6;
+  --card: rgba(255, 255, 255, 0.82);
+  --card-strong: rgba(255, 255, 255, 0.96);
+  --fg: #1f2937;
+  --muted: #617385;
+  --line: rgba(105, 126, 149, 0.22);
+  --accent: #0a84c6;
+  --accent-2: #df6b31;
+  --shadow: 0 18px 60px rgba(71, 96, 122, 0.18);
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   color: var(--fg);
-  background: radial-gradient(circle at top left, var(--bg-2), var(--bg));
+  background:
+    radial-gradient(circle at top left, rgba(71, 192, 255, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(255, 138, 76, 0.12), transparent 24%),
+    linear-gradient(180deg, var(--bg-2), var(--bg));
+  min-height: 100vh;
 }
-main {
+.dashboard-shell {
   max-width: 1100px;
   margin: 0 auto;
   padding: 24px;
 }
 .topbar {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
+  gap: 18px;
   flex-wrap: wrap;
+  margin-bottom: 16px;
 }
-h1 { margin: 0 0 6px 0; font-size: 2rem; }
-#status { margin: 0; color: var(--muted); }
+.title-block {
+  max-width: 34rem;
+}
+.eyebrow,
+.panel-kicker {
+  margin: 0 0 6px 0;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+h1 {
+  margin: 0 0 8px 0;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 0.98;
+}
+h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+#status {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .controls {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: stretch;
+  justify-content: flex-end;
+  gap: 10px;
   color: var(--muted);
+  flex-wrap: wrap;
+  flex: 1 1 340px;
 }
-.controls label { font-size: 0.9rem; }
+.control-field,
+.control-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.control-field {
+  flex-direction: column;
+  min-width: 140px;
+}
+.control-actions {
+  align-items: flex-end;
+}
+.controls label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
 .controls select,
 .controls button {
   border: 1px solid var(--line);
-  background: var(--card);
+  background: var(--card-strong);
   color: var(--fg);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 0.9rem;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  min-height: 44px;
+  backdrop-filter: blur(14px);
 }
 .controls button {
   cursor: pointer;
-  width: 36px;
-  font-size: 1rem;
+  min-width: 84px;
+  font-weight: 700;
 }
-#chart {
+.panel {
   background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  margin-top: 12px;
-  min-height: 520px;
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 0 20px;
+}
+.chart-panel {
+  overflow: hidden;
+}
+#chart {
+  min-height: clamp(320px, 58vh, 560px);
+  padding: 4px 6px 0 6px;
 }
 #summary-wrap {
-  margin-top: 12px;
+  margin-top: 14px;
+  overflow: hidden;
 }
 #summary-table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  overflow: hidden;
+  background: transparent;
 }
 #summary-table th,
 #summary-table td {
   text-align: left;
-  padding: 10px 12px;
+  padding: 14px 20px;
   border-bottom: 1px solid var(--line);
 }
 #summary-table th {
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.84rem;
   font-weight: 700;
 }
 #summary-table td { font-weight: 600; }
+#summary-table td[data-cell="metric"] {
+  font-weight: 700;
+}
 #summary-table tbody tr:last-child td { border-bottom: none; }
+@media (max-width: 720px) {
+  .dashboard-shell {
+    padding: 14px;
+  }
+  .controls {
+    justify-content: stretch;
+  }
+  .control-field,
+  .control-actions {
+    flex: 1 1 100%;
+  }
+  .control-actions {
+    gap: 10px;
+  }
+  .control-actions button {
+    flex: 1 1 0;
+  }
+  .panel-header {
+    padding: 16px 16px 0 16px;
+  }
+  #chart {
+    min-height: min(60vh, 420px);
+    padding: 0;
+  }
+  #summary-table thead {
+    display: none;
+  }
+  #summary-table,
+  #summary-table tbody,
+  #summary-table tr,
+  #summary-table td {
+    display: block;
+    width: 100%;
+  }
+  #summary-table tbody {
+    padding: 8px;
+  }
+  #summary-table tr {
+    background: var(--card-strong);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  #summary-table td {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 14px;
+  }
+  #summary-table td[data-cell="metric"] {
+    padding: 14px 14px 10px 14px;
+    font-size: 1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  #summary-table td:last-child {
+    border-bottom: none;
+  }
+  #summary-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  #summary-table td[data-cell="metric"]::before {
+    content: none;
+  }
+}
 """
 
 
@@ -352,7 +517,13 @@ function renderSummaryTable(latest, expectedNowPct) {
     ['Expected weekly usage (now)', fmtPct(expectedNowPct), '']
   ];
   summaryBodyEl.innerHTML = rows
-    .map((row) => `<tr><td>${row[0]}</td><td>${row[1]}</td><td>${row[2]}</td></tr>`)
+    .map((row) => `
+      <tr>
+        <td data-cell="metric">${row[0]}</td>
+        <td data-label="Usage">${row[1]}</td>
+        <td data-label="Resets At (Local)">${row[2] || '-'}</td>
+      </tr>
+    `)
     .join('');
 }
 
@@ -554,15 +725,15 @@ function currentTheme() {
   return themeMode === 'light'
     ? {
         bodyClass: 'theme-light',
-        plotBg: '#ffffff',
-        paperBg: '#ffffff',
+        plotBg: 'rgba(255,255,255,0)',
+        paperBg: 'rgba(255,255,255,0)',
         grid: '#e1e7ef',
         fg: '#1d2733'
       }
     : {
         bodyClass: 'theme-dark',
-        plotBg: '#151922',
-        paperBg: '#151922',
+        plotBg: 'rgba(0,0,0,0)',
+        paperBg: 'rgba(0,0,0,0)',
         grid: '#2a313d',
         fg: '#f3f5f7'
       };
@@ -572,7 +743,17 @@ function applyTheme() {
   const theme = currentTheme();
   document.body.classList.remove('theme-light', 'theme-dark');
   document.body.classList.add(theme.bodyClass);
-  themeToggleEl.textContent = themeMode === 'light' ? '🌙' : '☀';
+  themeToggleEl.textContent = themeMode === 'light' ? 'Dark' : 'Light';
+}
+
+function isCompactViewport() {
+  return window.matchMedia('(max-width: 720px)').matches;
+}
+
+function effectiveRangePreset() {
+  if (rangePreset === 'manual') return rangePreset;
+  if (isCompactViewport() && !storageGet('tracker_range_preset', null)) return 'today';
+  return rangePreset;
 }
 
 
@@ -600,7 +781,7 @@ function bindControls() {
   if (!['dark','light'].includes(themeMode)) themeMode = 'dark';
 
   viewModeEl.value = viewMode;
-  rangePresetEl.value = rangePreset;
+  rangePresetEl.value = effectiveRangePreset();
   applyTheme();
 
   viewModeEl.addEventListener('change', () => {
@@ -639,6 +820,11 @@ function bindControls() {
 
 function renderChart(rows) {
   const theme = currentTheme();
+  const compact = isCompactViewport();
+  const activeRangePreset = effectiveRangePreset();
+  const lineWidth = compact ? 1.6 : 2.5;
+  const markerSize = compact ? 2.5 : 4;
+  rangePresetEl.value = activeRangePreset;
 
   if (!rows.length) {
     Plotly.newPlot(chartEl, [], {
@@ -647,8 +833,9 @@ function renderChart(rows) {
       paper_bgcolor: theme.paperBg,
       plot_bgcolor: theme.plotBg,
       font: { color: theme.fg },
-      xaxis: { title: 'Time (Local)', tickformat: '%Y-%m-%d %H:%M', hoverformat: '%Y-%m-%d %H:%M', gridcolor: theme.grid },
-      yaxis: { title: 'Utilization (%)', range: [0, 102], gridcolor: theme.grid }
+      xaxis: { title: compact ? null : 'Time (Local)', tickformat: '%Y-%m-%d %H:%M', hoverformat: '%Y-%m-%d %H:%M', gridcolor: theme.grid },
+      yaxis: { title: compact ? null : 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
+      margin: compact ? { t: 20, r: 18, b: 48, l: 42 } : { t: 24, r: 30, b: 72, l: 60 }
     }, { responsive: true });
     ensureRelayoutBinding();
     renderSummaryTable(null, null);
@@ -662,8 +849,8 @@ function renderChart(rows) {
       y: seriesFor(rows, 'session_pct'),
       mode: 'lines+markers',
       name: 'Current session',
-      line: { color: '#1f8deb', width: 2.5 },
-      marker: { size: 4 },
+      line: { color: '#1f8deb', width: lineWidth },
+      marker: { size: markerSize },
       cliponaxis: false
     },
     {
@@ -671,8 +858,8 @@ function renderChart(rows) {
       y: seriesFor(rows, 'weekly_pct'),
       mode: 'lines+markers',
       name: 'Weekly',
-      line: { color: '#ff6a2b', width: 2.5 },
-      marker: { size: 4 },
+      line: { color: '#ff6a2b', width: lineWidth },
+      marker: { size: markerSize },
       cliponaxis: false
     },
     {
@@ -680,8 +867,8 @@ function renderChart(rows) {
       y: seriesFor(rows, 'extra_pct'),
       mode: 'lines+markers',
       name: 'Extra usage',
-      line: { color: '#1db6a3', width: 2.5 },
-      marker: { size: 4 },
+      line: { color: '#1db6a3', width: lineWidth },
+      marker: { size: markerSize },
       cliponaxis: false
     }
   ];
@@ -694,17 +881,17 @@ function renderChart(rows) {
   renderSummaryTable(latest, expectedData ? expectedData.expectedNowPct : null);
 
   const xaxisLayout = {
-    title: 'Time (Local)',
+    title: compact ? null : 'Time (Local)',
     tickformat: '%Y-%m-%d %H:%M',
     hoverformat: '%Y-%m-%d %H:%M',
     gridcolor: theme.grid
   };
 
-  if (rangePreset === 'manual' && userXRange) {
+  if (activeRangePreset === 'manual' && userXRange) {
     xaxisLayout.range = userXRange;
     xaxisLayout.autorange = false;
   } else {
-    const presetRange = computeRangePreset(rows, rangePreset);
+    const presetRange = computeRangePreset(rows, activeRangePreset);
     if (presetRange) {
       xaxisLayout.range = presetRange;
       xaxisLayout.autorange = false;
@@ -718,10 +905,12 @@ function renderChart(rows) {
     plot_bgcolor: theme.plotBg,
     font: { color: theme.fg },
     xaxis: xaxisLayout,
-    yaxis: { title: 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
+    yaxis: { title: compact ? null : 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
     shapes: buildShapes(rows),
-    margin: { t: 50, r: 30, b: 100, l: 60 },
-    legend: { orientation: 'h', y: -0.18, yanchor: 'top' }
+    margin: compact ? { t: 20, r: 18, b: 88, l: 42 } : { t: 28, r: 30, b: 100, l: 60 },
+    legend: compact
+      ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 } }
+      : { orientation: 'h', y: -0.18, yanchor: 'top' }
   }, { responsive: true });
 
   ensureRelayoutBinding();
@@ -743,6 +932,7 @@ async function refreshData() {
 bindControls();
 renderChart([]);
 refreshData();
+window.addEventListener('resize', () => renderChart(currentRows));
 setInterval(refreshData, __POLL_MS__);
 """
     return (
