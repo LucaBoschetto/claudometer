@@ -98,7 +98,7 @@ Or with launcher:
 During polling, if auth expires (401/403/redirect to login), the tool:
 
 - Logs the auth failure
-- Re-opens headed Chromium for login
+- Re-opens the configured headed auth browser for login
 - Resumes polling after successful login
 
 ## Cloudflare Loop Fallback
