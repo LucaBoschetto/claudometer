@@ -45,6 +45,12 @@ CREATE INDEX IF NOT EXISTS idx_usage_runs_ts_start ON usage_runs(ts_start);
 CREATE INDEX IF NOT EXISTS idx_usage_runs_ts_end ON usage_runs(ts_end);
 """
 
+LEGACY_USAGE_LOG_EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("extra_enabled", "INTEGER"),
+    ("extra_used_credits", "REAL"),
+    ("extra_monthly_limit", "REAL"),
+)
+
 
 class UsageDB:
     def __init__(self, path: Path):
@@ -170,6 +176,8 @@ class UsageDB:
         if not has_legacy:
             return
 
+        self._migrate_legacy_usage_log(conn)
+
         run_count = conn.execute("SELECT COUNT(*) FROM usage_runs").fetchone()[0]
         if run_count:
             self._drop_legacy_usage_log_if_safe(conn)
@@ -292,6 +300,15 @@ class UsageDB:
             run["extra_used_credits"],
             run["extra_monthly_limit"],
         )
+
+    def _migrate_legacy_usage_log(self, conn: sqlite3.Connection) -> None:
+        existing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(usage_log)").fetchall()
+        }
+        for column_name, column_type in LEGACY_USAGE_LOG_EXPECTED_COLUMNS:
+            if column_name in existing_columns:
+                continue
+            conn.execute(f"ALTER TABLE usage_log ADD COLUMN {column_name} {column_type}")
 
     def _drop_legacy_usage_log_if_safe(self, conn: sqlite3.Connection) -> None:
         has_legacy = conn.execute(
