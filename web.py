@@ -233,15 +233,14 @@ body {
   padding: 24px;
 }
 .topbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 18px 24px;
   margin-bottom: 16px;
 }
 .title-block {
-  max-width: 34rem;
+  min-width: 0;
 }
 .eyebrow,
 .panel-kicker {
@@ -264,7 +263,10 @@ h2 {
 #status {
   margin: 0;
   color: var(--muted);
-  line-height: 1.5;
+  line-height: 1.35;
+  font-size: 0.92rem;
+  max-width: 72rem;
+  text-wrap: balance;
 }
 .controls {
   display: flex;
@@ -273,7 +275,8 @@ h2 {
   gap: 10px;
   color: var(--muted);
   flex-wrap: wrap;
-  flex: 1 1 340px;
+  width: fit-content;
+  max-width: 100%;
 }
 .control-field,
 .control-actions {
@@ -359,8 +362,13 @@ h2 {
   .dashboard-shell {
     padding: 14px;
   }
+  .topbar {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
   .controls {
     justify-content: stretch;
+    max-width: none;
   }
   .control-field,
   .control-actions {
@@ -891,7 +899,10 @@ function renderChart(rows) {
   if (expectedData) traces.push(expectedData.trace);
 
   const latest = rows[rows.length - 1];
-  statusEl.textContent = 'Samples: ' + currentTotalSamples + ' | Last sample (Local): ' + formatLocalDateTimeFull(latest.ts);
+  statusEl.textContent =
+    'Samples: ' + currentTotalSamples +
+    ' | Polling interval: __POLL_INTERVAL_SECONDS__s' +
+    ' | Last sample: ' + formatLocalDateTimeFull(latest.ts);
   renderSummaryTable(latest, expectedData ? expectedData.expectedNowPct : null);
 
   const xaxisLayout = {
@@ -952,6 +963,7 @@ setInterval(refreshData, __POLL_MS__);
 """
     return (
         js.replace("__POLL_MS__", str(poll_ms))
+        .replace("__POLL_INTERVAL_SECONDS__", str(poll_interval_seconds))
         .replace("__EXPECTED_LINE_ENABLED__", "true" if expected_weekly_line_enabled else "false")
         .replace("__EXPECTED_ACTIVE_START__", expected_active_start_hhmm)
         .replace("__EXPECTED_ACTIVE_END__", expected_active_end_hhmm)
