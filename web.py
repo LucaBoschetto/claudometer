@@ -69,10 +69,8 @@ def _build_handler(
                 return
 
             if self.path == "/data.json":
-                payload = {
-                    "rows": db.fetch_all(),
-                    "poll_interval_seconds": poll_interval_seconds,
-                }
+                payload = db.fetch_chart_data()
+                payload["poll_interval_seconds"] = poll_interval_seconds
                 self._respond_json(payload)
                 return
 
@@ -453,6 +451,7 @@ const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
 let hasInitializedXRange = false;
 let hasBoundRelayout = false;
 let userXRange = null;
+let currentTotalSamples = 0;
 
 
 function storageGet(key, fallback) {
@@ -892,7 +891,7 @@ function renderChart(rows) {
   if (expectedData) traces.push(expectedData.trace);
 
   const latest = rows[rows.length - 1];
-  statusEl.textContent = 'Samples: ' + rows.length + ' | Last sample (Local): ' + formatLocalDateTimeFull(latest.ts);
+  statusEl.textContent = 'Samples: ' + currentTotalSamples + ' | Last sample (Local): ' + formatLocalDateTimeFull(latest.ts);
   renderSummaryTable(latest, expectedData ? expectedData.expectedNowPct : null);
 
   const xaxisLayout = {
@@ -938,6 +937,7 @@ async function refreshData() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const payload = await res.json();
     currentRows = payload.rows || [];
+    currentTotalSamples = payload.total_samples || currentRows.length;
     renderChart(currentRows);
   } catch (err) {
     statusEl.textContent = 'Data fetch failed: ' + err;
