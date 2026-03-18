@@ -83,6 +83,12 @@ Or with launcher:
 ./tracker.sh stop
 ```
 
+By default, the dashboard binds to localhost via `DASHBOARD_HOST=127.0.0.1`.
+
+If you want to view it from another device on your local network, such as your phone, set `DASHBOARD_HOST` either to your machine's LAN IP address or to `0.0.0.0` to listen on all interfaces.
+
+Be careful: you could also expose it externally through your home router/NAT, but the dashboard has no authentication, so do that only if you understand the risk.
+
 ## First Run
 
 - A headed browser window opens at Claude login using `AUTH_BROWSER` from `~/.claude-usage-tracker/config.env`.
