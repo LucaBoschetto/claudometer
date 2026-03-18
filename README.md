@@ -3,7 +3,7 @@
 Lightweight local tracker for `https://claude.ai/settings/usage` that:
 
 - Polls usage every `POLL_INTERVAL_SECONDS` (default `60`)
-- Stores samples in local SQLite (`~/.claude-usage-tracker/usage.db`)
+- Stores normalized usage runs in local SQLite (`~/.claude-usage-tracker/usage.db`)
 - Serves a live dashboard at `http://127.0.0.1:7474`
 - Optionally shows a dashed "Expected weekly usage" guideline
 - Uses local time in chart/status display
@@ -16,7 +16,7 @@ Lightweight local tracker for `https://claude.ai/settings/usage` that:
 - Reset timestamps for session + weekly windows
 - Extra-usage reset date is not currently captured (not present in the `/api/organizations/{org_id}/usage` JSON we use)
 
-All percentages are normalized to `0..100` before storage.
+All percentages are normalized to `0..100` before storage. Reset timestamps are rounded to the nearest minute before run coalescing, and each run stores both its time span and represented sample count.
 
 ## Files
 
@@ -109,13 +109,19 @@ Behavior:
 ## Database Schema
 
 ```sql
-CREATE TABLE usage_log (
-  ts              TEXT NOT NULL,
-  session_pct     REAL,
-  session_resets  TEXT,
-  weekly_pct      REAL,
-  weekly_resets   TEXT,
-  extra_pct       REAL
+CREATE TABLE usage_runs (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_start            TEXT NOT NULL,
+  ts_end              TEXT NOT NULL,
+  sample_count        INTEGER NOT NULL,
+  session_pct         REAL,
+  session_resets      TEXT,
+  weekly_pct          REAL,
+  weekly_resets       TEXT,
+  extra_pct           REAL,
+  extra_enabled       INTEGER,
+  extra_used_credits  REAL,
+  extra_monthly_limit REAL
 );
 ```
 

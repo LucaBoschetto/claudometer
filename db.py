@@ -9,37 +9,19 @@ from typing import Any
 from models import UsageSample
 
 
-USAGE_LOG_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS usage_log (
-  ts                 TEXT NOT NULL,
-  session_pct        REAL,
-  session_resets     TEXT,
-  weekly_pct         REAL,
-  weekly_resets      TEXT,
-  extra_pct          REAL,
-  extra_enabled      INTEGER,
-  extra_used_credits REAL,
-  extra_monthly_limit REAL
-);
-"""
-
-USAGE_LOG_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_usage_log_ts ON usage_log(ts);
-"""
-
 USAGE_RUNS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS usage_runs (
-  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts_start           TEXT NOT NULL,
-  ts_end             TEXT NOT NULL,
-  sample_count       INTEGER NOT NULL,
-  session_pct        REAL,
-  session_resets     TEXT,
-  weekly_pct         REAL,
-  weekly_resets      TEXT,
-  extra_pct          REAL,
-  extra_enabled      INTEGER,
-  extra_used_credits REAL,
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_start            TEXT NOT NULL,
+  ts_end              TEXT NOT NULL,
+  sample_count        INTEGER NOT NULL,
+  session_pct         REAL,
+  session_resets      TEXT,
+  weekly_pct          REAL,
+  weekly_resets       TEXT,
+  extra_pct           REAL,
+  extra_enabled       INTEGER,
+  extra_used_credits  REAL,
   extra_monthly_limit REAL
 );
 """
@@ -48,19 +30,6 @@ USAGE_RUNS_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_usage_runs_ts_start ON usage_runs(ts_start);
 CREATE INDEX IF NOT EXISTS idx_usage_runs_ts_end ON usage_runs(ts_end);
 """
-
-EXPECTED_USAGE_LOG_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("extra_enabled", "INTEGER"),
-    ("extra_used_credits", "REAL"),
-    ("extra_monthly_limit", "REAL"),
-)
-
-BACKFILL_COLUMNS: tuple[str, ...] = (
-    "extra_pct",
-    "extra_enabled",
-    "extra_used_credits",
-    "extra_monthly_limit",
-)
 
 
 class UsageDB:
@@ -71,13 +40,8 @@ class UsageDB:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute(USAGE_LOG_SCHEMA_SQL)
-            conn.execute(USAGE_LOG_INDEX_SQL)
-            self._migrate_usage_log(conn)
-            self._backfill_extra_usage(conn)
             conn.executescript(USAGE_RUNS_SCHEMA_SQL)
             conn.executescript(USAGE_RUNS_INDEX_SQL)
-            self._backfill_usage_runs(conn)
             conn.commit()
 
     def insert_sample(self, sample: UsageSample) -> None:
@@ -184,147 +148,6 @@ class UsageDB:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
 
-    def _migrate_usage_log(self, conn: sqlite3.Connection) -> None:
-        existing_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(usage_log)").fetchall()
-        }
-        for column_name, column_type in EXPECTED_USAGE_LOG_COLUMNS:
-            if column_name in existing_columns:
-                continue
-            conn.execute(f"ALTER TABLE usage_log ADD COLUMN {column_name} {column_type}")
-
-    def _backfill_extra_usage(self, conn: sqlite3.Connection) -> None:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT rowid, ts, extra_pct, extra_enabled, extra_used_credits, extra_monthly_limit
-            FROM usage_log
-            ORDER BY ts ASC
-            """
-        ).fetchall()
-
-        carried: dict[str, Any] = {column_name: None for column_name in BACKFILL_COLUMNS}
-        updates: list[tuple[Any, ...]] = []
-
-        for row in rows:
-            next_values: dict[str, Any] = {}
-            changed = False
-            original_extra_pct = row["extra_pct"]
-            for column_name in BACKFILL_COLUMNS:
-                current_value = row[column_name]
-                if current_value is not None:
-                    carried[column_name] = current_value
-                    next_values[column_name] = current_value
-                    continue
-                next_values[column_name] = carried[column_name]
-                if carried[column_name] is not None:
-                    changed = True
-
-            if original_extra_pct is None and next_values["extra_pct"] is not None:
-                next_values["extra_enabled"] = 0
-                changed = True
-
-            if not changed:
-                continue
-
-            updates.append(
-                (
-                    next_values["extra_pct"],
-                    next_values["extra_enabled"],
-                    next_values["extra_used_credits"],
-                    next_values["extra_monthly_limit"],
-                    row["rowid"],
-                )
-            )
-
-        if updates:
-            conn.executemany(
-                """
-                UPDATE usage_log
-                SET
-                  extra_pct = ?,
-                  extra_enabled = ?,
-                  extra_used_credits = ?,
-                  extra_monthly_limit = ?
-                WHERE rowid = ?
-                """,
-                updates,
-            )
-
-    def _backfill_usage_runs(self, conn: sqlite3.Connection) -> None:
-        existing = conn.execute("SELECT COUNT(*) FROM usage_runs").fetchone()[0]
-        if existing:
-            return
-
-        conn.row_factory = sqlite3.Row
-        raw_rows = conn.execute(
-            """
-            SELECT
-              ts,
-              session_pct,
-              session_resets,
-              weekly_pct,
-              weekly_resets,
-              extra_pct,
-              extra_enabled,
-              extra_used_credits,
-              extra_monthly_limit
-            FROM usage_log
-            ORDER BY ts ASC
-            """
-        ).fetchall()
-        if not raw_rows:
-            return
-
-        runs: list[tuple[Any, ...]] = []
-        current_run: dict[str, Any] | None = None
-
-        for row in raw_rows:
-            sample = self._normalize_sample(self._sample_from_row(row))
-            if current_run is not None and self._sample_matches_run(sample, current_run):
-                current_run["ts_end"] = sample.ts
-                current_run["sample_count"] += 1
-                continue
-
-            if current_run is not None:
-                runs.append(self._run_insert_tuple(current_run))
-
-            current_run = {
-                "ts_start": sample.ts,
-                "ts_end": sample.ts,
-                "sample_count": 1,
-                "session_pct": sample.session_pct,
-                "session_resets": sample.session_resets,
-                "weekly_pct": sample.weekly_pct,
-                "weekly_resets": sample.weekly_resets,
-                "extra_pct": sample.extra_pct,
-                "extra_enabled": None if sample.extra_enabled is None else int(sample.extra_enabled),
-                "extra_used_credits": sample.extra_used_credits,
-                "extra_monthly_limit": sample.extra_monthly_limit,
-            }
-
-        if current_run is not None:
-            runs.append(self._run_insert_tuple(current_run))
-
-        conn.executemany(
-            """
-            INSERT INTO usage_runs (
-              ts_start,
-              ts_end,
-              sample_count,
-              session_pct,
-              session_resets,
-              weekly_pct,
-              weekly_resets,
-              extra_pct,
-              extra_enabled,
-              extra_used_credits,
-              extra_monthly_limit
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            runs,
-        )
-
     def _normalize_sample(self, sample: UsageSample) -> UsageSample:
         return replace(
             sample,
@@ -342,35 +165,6 @@ class UsageDB:
             and _boolish(sample.extra_enabled) == _boolish(run["extra_enabled"])
             and sample.extra_used_credits == run["extra_used_credits"]
             and sample.extra_monthly_limit == run["extra_monthly_limit"]
-        )
-
-    def _sample_from_row(self, row: sqlite3.Row) -> UsageSample:
-        extra_enabled = row["extra_enabled"]
-        return UsageSample(
-            ts=row["ts"],
-            session_pct=row["session_pct"],
-            session_resets=row["session_resets"],
-            weekly_pct=row["weekly_pct"],
-            weekly_resets=row["weekly_resets"],
-            extra_pct=row["extra_pct"],
-            extra_enabled=None if extra_enabled is None else bool(extra_enabled),
-            extra_used_credits=row["extra_used_credits"],
-            extra_monthly_limit=row["extra_monthly_limit"],
-        )
-
-    def _run_insert_tuple(self, run: dict[str, Any]) -> tuple[Any, ...]:
-        return (
-            run["ts_start"],
-            run["ts_end"],
-            run["sample_count"],
-            run["session_pct"],
-            run["session_resets"],
-            run["weekly_pct"],
-            run["weekly_resets"],
-            run["extra_pct"],
-            run["extra_enabled"],
-            run["extra_used_credits"],
-            run["extra_monthly_limit"],
         )
 
     def _run_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
