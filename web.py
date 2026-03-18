@@ -859,29 +859,12 @@ function renderChart(rows) {
   const traces = [
     {
       x,
-      y: seriesFor(rows, 'session_pct'),
-      mode: 'lines+markers',
-      name: 'Current session',
-      line: { color: '#1f8deb', width: lineWidth },
-      marker: { size: markerSize },
-      cliponaxis: false
-    },
-    {
-      x,
-      y: seriesFor(rows, 'weekly_pct'),
-      mode: 'lines+markers',
-      name: 'Weekly',
-      line: { color: '#ff6a2b', width: lineWidth },
-      marker: { size: markerSize },
-      cliponaxis: false
-    },
-    {
-      x,
       y: maskedSeries(rows, 'extra_pct', (row) => row.extra_enabled !== false),
       mode: 'lines+markers',
       name: 'Extra usage',
       line: { color: '#1db6a3', width: lineWidth },
       marker: { size: markerSize },
+      legendrank: 30,
       cliponaxis: false
     },
     {
@@ -891,12 +874,36 @@ function renderChart(rows) {
       name: 'Extra usage (disabled)',
       line: { color: '#0f5f50', width: lineWidth },
       marker: { size: markerSize },
+      legendrank: 40,
+      cliponaxis: false
+    },
+    {
+      x,
+      y: seriesFor(rows, 'session_pct'),
+      mode: 'lines+markers',
+      name: 'Current session',
+      line: { color: '#1f8deb', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 10,
+      cliponaxis: false
+    },
+    {
+      x,
+      y: seriesFor(rows, 'weekly_pct'),
+      mode: 'lines+markers',
+      name: 'Weekly',
+      line: { color: '#ff6a2b', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 20,
       cliponaxis: false
     }
   ];
 
   const expectedData = computeExpectedWeeklyTrace(rows);
-  if (expectedData) traces.push(expectedData.trace);
+  if (expectedData) {
+    expectedData.trace.legendrank = 50;
+    traces.push(expectedData.trace);
+  }
 
   const latest = rows[rows.length - 1];
   statusEl.textContent =
@@ -934,8 +941,8 @@ function renderChart(rows) {
     shapes: buildShapes(rows),
     margin: compact ? { t: 20, r: 18, b: 88, l: 42 } : { t: 28, r: 30, b: 100, l: 60 },
     legend: compact
-      ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 } }
-      : { orientation: 'h', y: -0.18, yanchor: 'top' }
+      ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 }, traceorder: 'normal' }
+      : { orientation: 'h', y: -0.18, yanchor: 'top', traceorder: 'normal' }
   }, { responsive: true });
 
   ensureRelayoutBinding();
