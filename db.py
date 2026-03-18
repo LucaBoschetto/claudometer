@@ -9,6 +9,20 @@ from typing import Any
 from models import UsageSample
 
 
+LEGACY_USAGE_LOG_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS usage_log (
+  ts                 TEXT NOT NULL,
+  session_pct        REAL,
+  session_resets     TEXT,
+  weekly_pct         REAL,
+  weekly_resets      TEXT,
+  extra_pct          REAL,
+  extra_enabled      INTEGER,
+  extra_used_credits REAL,
+  extra_monthly_limit REAL
+);
+"""
+
 USAGE_RUNS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS usage_runs (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +56,7 @@ class UsageDB:
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.executescript(USAGE_RUNS_SCHEMA_SQL)
             conn.executescript(USAGE_RUNS_INDEX_SQL)
+            self._import_legacy_usage_log_if_needed(conn)
             conn.commit()
 
     def insert_sample(self, sample: UsageSample) -> None:
@@ -148,6 +163,88 @@ class UsageDB:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
 
+    def _import_legacy_usage_log_if_needed(self, conn: sqlite3.Connection) -> None:
+        has_legacy = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_log'"
+        ).fetchone()[0]
+        if not has_legacy:
+            return
+
+        run_count = conn.execute("SELECT COUNT(*) FROM usage_runs").fetchone()[0]
+        if run_count:
+            self._drop_legacy_usage_log_if_safe(conn)
+            return
+
+        conn.row_factory = sqlite3.Row
+        legacy_rows = conn.execute(
+            """
+            SELECT
+              ts,
+              session_pct,
+              session_resets,
+              weekly_pct,
+              weekly_resets,
+              extra_pct,
+              extra_enabled,
+              extra_used_credits,
+              extra_monthly_limit
+            FROM usage_log
+            ORDER BY ts ASC
+            """
+        ).fetchall()
+        if not legacy_rows:
+            return
+
+        runs: list[tuple[Any, ...]] = []
+        current_run: dict[str, Any] | None = None
+
+        for row in legacy_rows:
+            sample = self._normalize_sample(self._sample_from_legacy_row(row))
+            if current_run is not None and self._sample_matches_run(sample, current_run):
+                current_run["ts_end"] = sample.ts
+                current_run["sample_count"] += 1
+                continue
+
+            if current_run is not None:
+                runs.append(self._run_insert_tuple(current_run))
+
+            current_run = {
+                "ts_start": sample.ts,
+                "ts_end": sample.ts,
+                "sample_count": 1,
+                "session_pct": sample.session_pct,
+                "session_resets": sample.session_resets,
+                "weekly_pct": sample.weekly_pct,
+                "weekly_resets": sample.weekly_resets,
+                "extra_pct": sample.extra_pct,
+                "extra_enabled": None if sample.extra_enabled is None else int(sample.extra_enabled),
+                "extra_used_credits": sample.extra_used_credits,
+                "extra_monthly_limit": sample.extra_monthly_limit,
+            }
+
+        if current_run is not None:
+            runs.append(self._run_insert_tuple(current_run))
+
+        conn.executemany(
+            """
+            INSERT INTO usage_runs (
+              ts_start,
+              ts_end,
+              sample_count,
+              session_pct,
+              session_resets,
+              weekly_pct,
+              weekly_resets,
+              extra_pct,
+              extra_enabled,
+              extra_used_credits,
+              extra_monthly_limit
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            runs,
+        )
+        self._drop_legacy_usage_log_if_safe(conn)
+
     def _normalize_sample(self, sample: UsageSample) -> UsageSample:
         return replace(
             sample,
@@ -166,6 +263,56 @@ class UsageDB:
             and sample.extra_used_credits == run["extra_used_credits"]
             and sample.extra_monthly_limit == run["extra_monthly_limit"]
         )
+
+    def _sample_from_legacy_row(self, row: sqlite3.Row) -> UsageSample:
+        extra_enabled = row["extra_enabled"]
+        return UsageSample(
+            ts=row["ts"],
+            session_pct=row["session_pct"],
+            session_resets=row["session_resets"],
+            weekly_pct=row["weekly_pct"],
+            weekly_resets=row["weekly_resets"],
+            extra_pct=row["extra_pct"],
+            extra_enabled=None if extra_enabled is None else bool(extra_enabled),
+            extra_used_credits=row["extra_used_credits"],
+            extra_monthly_limit=row["extra_monthly_limit"],
+        )
+
+    def _run_insert_tuple(self, run: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            run["ts_start"],
+            run["ts_end"],
+            run["sample_count"],
+            run["session_pct"],
+            run["session_resets"],
+            run["weekly_pct"],
+            run["weekly_resets"],
+            run["extra_pct"],
+            run["extra_enabled"],
+            run["extra_used_credits"],
+            run["extra_monthly_limit"],
+        )
+
+    def _drop_legacy_usage_log_if_safe(self, conn: sqlite3.Connection) -> None:
+        has_legacy = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_log'"
+        ).fetchone()[0]
+        if not has_legacy:
+            return
+
+        legacy_count = conn.execute("SELECT COUNT(*) FROM usage_log").fetchone()[0]
+        run_summary = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(sample_count), 0) FROM usage_runs"
+        ).fetchone()
+        run_count = int(run_summary[0])
+        represented_samples = int(run_summary[1])
+
+        # Drop only when the compacted table is clearly populated and represents
+        # at least as many samples as the legacy source table.
+        if legacy_count <= 0 or run_count <= 0 or represented_samples < legacy_count:
+            return
+
+        conn.execute("DROP TABLE usage_log")
 
     def _run_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)

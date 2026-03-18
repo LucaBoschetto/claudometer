@@ -18,6 +18,8 @@ Lightweight local tracker for `https://claude.ai/settings/usage` that:
 
 All percentages are normalized to `0..100` before storage. Reset timestamps are rounded to the nearest minute before run coalescing, and each run stores both its time span and represented sample count.
 
+Current versions store only `usage_runs`. On first startup after upgrading from an older raw-sample version, the app will import legacy `usage_log` data into `usage_runs` if that table is still present.
+
 ## Files
 
 - `dashboard.py`: long-running process (poll + write DB + serve dashboard)
@@ -46,10 +48,30 @@ python3 -m pip install -r requirements.txt
 python3 -m playwright install chromium
 ```
 
+Or with `uv`:
+
+```bash
+uv sync
+uv run playwright install chromium
+```
+
+If you plan to use a different interactive auth browser, you can preinstall that Playwright browser too:
+
+```bash
+uv run playwright install firefox
+uv run playwright install webkit
+```
+
 2. Run:
 
 ```bash
 python3 dashboard.py
+```
+
+Or with `uv`:
+
+```bash
+uv run python dashboard.py
 ```
 
 Or with launcher:
@@ -63,7 +85,10 @@ Or with launcher:
 
 ## First Run
 
-- A headed Chromium window opens at Claude login.
+- A headed browser window opens at Claude login using `AUTH_BROWSER` from `~/.claude-usage-tracker/config.env`.
+- Supported values are `chrome`, `chromium`, `firefox`, and `webkit`.
+- The default is `chrome`; if Chrome launch fails, the app falls back to Chromium.
+- If the selected Playwright-managed browser binary is missing, the app will try to install it automatically and retry once.
 - Log in normally.
 - Once authenticated, auth data is stored in `~/.claude-usage-tracker/config.env`.
 - Polling starts and dashboard is available at `http://127.0.0.1:7474`.
@@ -78,7 +103,7 @@ During polling, if auth expires (401/403/redirect to login), the tool:
 
 ## Cloudflare Loop Fallback
 
-If headed Playwright gets stuck in a Cloudflare verification loop, bootstrap auth from a DevTools cURL capture:
+If headed Playwright gets stuck in a Cloudflare verification loop, bootstrap auth from a DevTools cURL capture. The parser supports both Chrome/Chromium-style exports that use `-b` and Firefox-style exports that send cookies via a `Cookie:` header:
 
 1. In a normal browser session where Claude is already logged in, open `https://claude.ai/settings/usage`.
 2. DevTools -> Network -> find `GET /api/organizations/<org_id>/usage`.
@@ -99,6 +124,7 @@ Set these in `~/.claude-usage-tracker/config.env`:
 - `EXPECTED_WEEKLY_LINE_ENABLED=true|false` (default `true`)
 - `EXPECTED_ACTIVE_START_HHMM=08:00` (default)
 - `EXPECTED_ACTIVE_END_HHMM=19:00` (default)
+- `AUTH_BROWSER=chrome|chromium|firefox|webkit` (default `chrome`)
 
 Behavior:
 
@@ -131,3 +157,4 @@ CREATE TABLE usage_runs (
 - Keep `~/.claude-usage-tracker/config.env` private.
 - If you exposed cookies/tokens, rotate Claude sessions and re-login.
 - If you need `extra usage` reset timestamps later, capture additional Usage-page network calls; `/usage` alone does not currently expose that field.
+- Browser profiles are stored per auth browser under `~/.claude-usage-tracker/browser-profile/` so switching auth browsers does not reuse an incompatible persistent profile.

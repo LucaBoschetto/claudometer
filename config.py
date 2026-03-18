@@ -19,6 +19,7 @@ class AppConfig:
     poll_interval_seconds: int
     host: str
     port: int
+    auth_browser: str
     claude_org_id: Optional[str]
     claude_cookie_header: Optional[str]
     anthropic_anonymous_id: Optional[str]
@@ -71,6 +72,15 @@ def _normalize_hhmm(raw: str | None, default: str) -> str:
     return f"{h:02d}:{m:02d}"
 
 
+def _normalize_auth_browser(raw: str | None, default: str) -> str:
+    if not raw:
+        return default
+    value = raw.strip().lower()
+    if value in {"chrome", "chromium", "firefox", "webkit"}:
+        return value
+    return default
+
+
 def load_config() -> AppConfig:
     ensure_runtime_paths()
 
@@ -89,6 +99,7 @@ def load_config() -> AppConfig:
         poll_interval_seconds=max(5, _as_int(get("POLL_INTERVAL_SECONDS"), 60)),
         host=get("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1",
         port=_as_int(get("DASHBOARD_PORT"), 7474),
+        auth_browser=_normalize_auth_browser(get("AUTH_BROWSER"), "chrome"),
         claude_org_id=get("CLAUDE_ORG_ID"),
         claude_cookie_header=get("CLAUDE_COOKIE_HEADER"),
         anthropic_anonymous_id=get("ANTHROPIC_ANONYMOUS_ID"),

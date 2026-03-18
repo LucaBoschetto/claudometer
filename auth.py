@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -8,7 +10,7 @@ from typing import Any
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from config import BROWSER_PROFILE_DIR, RUNTIME_ENV_PATH
+from config import BROWSER_PROFILE_DIR, RUNTIME_ENV_PATH, load_config
 
 LOGIN_URL = "https://claude.ai/login"
 USAGE_URL = "https://claude.ai/settings/usage"
@@ -29,22 +31,10 @@ class AuthTimeoutError(RuntimeError):
 
 def interactive_login_and_save_config(logger: logging.Logger, reason: str) -> dict[str, str]:
     logger.info("Starting headed login flow (%s)", reason)
+    config = load_config()
 
     with sync_playwright() as p:
-        try:
-            # Using the installed Chrome channel often reduces Cloudflare challenges vs bundled Chromium.
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(BROWSER_PROFILE_DIR),
-                channel="chrome",
-                headless=False,
-                viewport={"width": 1280, "height": 900},
-            )
-        except Exception:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(BROWSER_PROFILE_DIR),
-                headless=False,
-                viewport={"width": 1280, "height": 900},
-            )
+        context = _launch_auth_browser(p, config.auth_browser, logger)
 
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(LOGIN_URL, wait_until="domcontentloaded")
@@ -137,6 +127,7 @@ def _write_runtime_env(values: dict[str, str]) -> None:
         _env_line(existing, "POLL_INTERVAL_SECONDS", "60"),
         _env_line(existing, "DASHBOARD_HOST", "127.0.0.1"),
         _env_line(existing, "DASHBOARD_PORT", "7474"),
+        _env_line(existing, "AUTH_BROWSER", "chrome"),
         _env_line(existing, "EXPECTED_WEEKLY_LINE_ENABLED", "true"),
         _env_line(existing, "EXPECTED_ACTIVE_START_HHMM", "08:00"),
         _env_line(existing, "EXPECTED_ACTIVE_END_HHMM", "19:00"),
@@ -147,3 +138,64 @@ def _write_runtime_env(values: dict[str, str]) -> None:
 
 def _env_line(existing: dict[str, str], key: str, default: str) -> str:
     return f"{key}={existing.get(key, default)}"
+
+
+def _launch_auth_browser(playwright: Any, auth_browser: str, logger: logging.Logger) -> Any:
+    browser_name = auth_browser.strip().lower()
+    profile_dir = BROWSER_PROFILE_DIR / browser_name
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    if browser_name == "chrome":
+        try:
+            logger.info("Launching auth browser: chrome")
+            return playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                channel="chrome",
+                headless=False,
+                viewport={"width": 1280, "height": 900},
+            )
+        except Exception as exc:
+            logger.warning("Chrome launch failed, falling back to Chromium: %s", exc)
+            browser_name = "chromium"
+            profile_dir = BROWSER_PROFILE_DIR / browser_name
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+    browser_type = getattr(playwright, browser_name)
+    logger.info("Launching auth browser: %s", browser_name)
+    try:
+        return browser_type.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=False,
+            viewport={"width": 1280, "height": 900},
+        )
+    except Exception as exc:
+        if not _looks_like_missing_browser_binary(exc):
+            raise
+        logger.warning(
+            "Browser %s is not installed for Playwright, attempting automatic install: %s",
+            browser_name,
+            exc,
+        )
+        _install_playwright_browser(browser_name, logger)
+        return browser_type.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=False,
+            viewport={"width": 1280, "height": 900},
+        )
+
+
+def _install_playwright_browser(browser_name: str, logger: logging.Logger) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install", browser_name],
+        check=True,
+    )
+    logger.info("Installed Playwright browser: %s", browser_name)
+
+
+def _looks_like_missing_browser_binary(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "executable doesn't exist" in text
+        or "browser has been closed" in text and "install" in text
+        or "please run the following command" in text
+    )
