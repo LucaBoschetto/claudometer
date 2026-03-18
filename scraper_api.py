@@ -20,6 +20,7 @@ def _normalize_usage_api_pct(value: Any) -> float | None:
     return max(0.0, min(100.0, v))
 
 USAGE_ENDPOINT_TEMPLATE = "https://claude.ai/api/organizations/{org_id}/usage"
+OVERAGE_SPEND_LIMIT_ENDPOINT_TEMPLATE = "https://claude.ai/api/organizations/{org_id}/overage_spend_limit"
 USAGE_REFERER = "https://claude.ai/settings/usage"
 
 
@@ -35,13 +36,9 @@ class UsageAPIClient:
         if not self.config.claude_org_id or not self.config.claude_cookie_header:
             raise AuthRequiredError("Missing org ID or cookie header in config")
 
+        headers = self._build_headers()
         url = USAGE_ENDPOINT_TEMPLATE.format(org_id=self.config.claude_org_id)
-        response = requests.get(
-            url,
-            headers=self._build_headers(),
-            timeout=30,
-            allow_redirects=True,
-        )
+        response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
 
         if response.status_code in (401, 403):
             raise AuthRequiredError(f"Received HTTP {response.status_code}")
@@ -54,7 +51,23 @@ class UsageAPIClient:
             raise AuthRequiredError("Unexpected non-JSON response, auth likely expired")
 
         payload = response.json()
-        return parse_payload(payload, ts_iso)
+        overage_payload = self._fetch_overage_payload(headers)
+        return parse_payload(payload, ts_iso, overage_payload)
+
+    def _fetch_overage_payload(self, headers: dict[str, str]) -> dict[str, Any] | None:
+        if not self.config.claude_org_id:
+            return None
+        url = OVERAGE_SPEND_LIMIT_ENDPOINT_TEMPLATE.format(org_id=self.config.claude_org_id)
+        response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+        if response.status_code in (401, 403):
+            raise AuthRequiredError(f"Received HTTP {response.status_code} from overage endpoint")
+        if "/login" in response.url:
+            raise AuthRequiredError("Redirected to login from overage endpoint")
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type.lower():
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
 
     def _build_headers(self) -> dict[str, str]:
         headers = {
@@ -73,18 +86,30 @@ class UsageAPIClient:
         return headers
 
 
-def parse_payload(payload: dict[str, Any], ts_iso: str) -> UsageSample:
+def parse_payload(
+    payload: dict[str, Any], ts_iso: str, overage_payload: dict[str, Any] | None = None
+) -> UsageSample:
     five_hour = payload.get("five_hour") or {}
     seven_day = payload.get("seven_day") or {}
     extra_usage = payload.get("extra_usage") or {}
+    overage = overage_payload or {}
 
     extra_util = _normalize_usage_api_pct(extra_usage.get("utilization"))
+    extra_enabled = _normalize_optional_bool(extra_usage.get("is_enabled"))
+    extra_used_credits = _as_float(extra_usage.get("used_credits"))
+    extra_monthly_limit = _as_float(extra_usage.get("monthly_limit"))
+
+    if extra_enabled is None:
+        extra_enabled = _normalize_optional_bool(overage.get("is_enabled"))
+    if extra_used_credits is None:
+        extra_used_credits = _as_float(overage.get("used_credits"))
+    if extra_monthly_limit is None:
+        extra_monthly_limit = _as_float(overage.get("monthly_credit_limit"))
+
     if extra_util is None:
-        monthly_limit = extra_usage.get("monthly_limit")
-        used_credits = extra_usage.get("used_credits")
-        if monthly_limit not in (None, 0) and used_credits is not None:
+        if extra_monthly_limit not in (None, 0) and extra_used_credits is not None:
             try:
-                extra_util = normalize_pct((float(used_credits) / float(monthly_limit)) * 100.0)
+                extra_util = normalize_pct((extra_used_credits / extra_monthly_limit) * 100.0)
             except (TypeError, ValueError, ZeroDivisionError):
                 extra_util = None
 
@@ -95,6 +120,9 @@ def parse_payload(payload: dict[str, Any], ts_iso: str) -> UsageSample:
         weekly_pct=_normalize_usage_api_pct(seven_day.get("utilization")),
         weekly_resets=_normalize_ts(seven_day.get("resets_at")),
         extra_pct=extra_util,
+        extra_enabled=extra_enabled,
+        extra_used_credits=extra_used_credits,
+        extra_monthly_limit=extra_monthly_limit,
     )
 
 
@@ -110,3 +138,28 @@ def _normalize_ts(raw: Any) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _normalize_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

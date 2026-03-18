@@ -510,10 +510,11 @@ function fmtPct(v) {
 
 function renderSummaryTable(latest, expectedNowPct) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
+  const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
   const rows = [
     ['Current session', fmtPct(latest ? latest.session_pct : null), fmtReset(latest ? latest.session_resets : null)],
     ['Weekly', fmtPct(latest ? latest.weekly_pct : null), fmtReset(latest ? latest.weekly_resets : null)],
-    ['Extra usage', fmtPct(latest ? latest.extra_pct : null), ''],
+    [extraMetricLabel, fmtPct(latest ? latest.extra_pct : null), ''],
     ['Expected weekly usage (now)', fmtPct(expectedNowPct), '']
   ];
   summaryBodyEl.innerHTML = rows
@@ -681,6 +682,11 @@ function seriesFor(rows, key) {
   if (viewMode === 'raw') return raw;
   if (viewMode === 'clean') return cleanIsolated(raw);
   return smoothMoving(cleanIsolated(raw), 3);
+}
+
+function maskedSeries(rows, key, predicate) {
+  const values = seriesFor(rows, key);
+  return values.map((value, index) => predicate(rows[index]) ? value : null);
 }
 
 function computeRangePreset(rows, preset) {
@@ -864,10 +870,19 @@ function renderChart(rows) {
     },
     {
       x,
-      y: seriesFor(rows, 'extra_pct'),
+      y: maskedSeries(rows, 'extra_pct', (row) => row.extra_enabled !== false),
       mode: 'lines+markers',
       name: 'Extra usage',
       line: { color: '#1db6a3', width: lineWidth },
+      marker: { size: markerSize },
+      cliponaxis: false
+    },
+    {
+      x,
+      y: maskedSeries(rows, 'extra_pct', (row) => row.extra_enabled === false),
+      mode: 'lines+markers',
+      name: 'Extra usage (disabled)',
+      line: { color: '#0f5f50', width: lineWidth },
       marker: { size: markerSize },
       cliponaxis: false
     }
