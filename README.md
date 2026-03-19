@@ -28,6 +28,7 @@ Current versions store only `usage_runs`. On first startup after upgrading from 
 - `scraper_api.py`: Option A API polling logic
 - `db.py`: SQLite schema and persistence
 - `web.py`: HTTP server + Plotly frontend
+- `claude_ping.py`: optional weekly-reset ping utility that sends a minimal Claude Code prompt at reset time and reschedules itself via `crontab`
 - `config.py`: runtime config loading
 - `tracker.sh`: launcher (`start|stop|restart|status|logs|launcher-logs|foreground`)
 
@@ -137,6 +138,12 @@ Behavior:
 - Dashed line progresses only during the active daily window
 - Reaches `100%` at next weekly reset
 - Summary line under the chart shows `Expected weekly usage (now)`
+
+## Weekly Ping Utility
+
+`claude_ping.py` is an optional helper that sends a minimal non-interactive Claude Code prompt at the weekly reset boundary to anchor the new usage window.
+
+It reads the current weekly reset from Claudometer's DB, runs `claude -p` from the CLI, and only rewrites its own `crontab` entry after the tracker DB has actually advanced to the next weekly reset. If you run it manually before the weekly window expires, it treats that as a test run and leaves cron unchanged.
 
 ## Database Schema
 
