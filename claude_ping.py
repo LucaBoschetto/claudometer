@@ -46,9 +46,10 @@ def setup_logger() -> logging.Logger:
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    if sys.stderr.isatty():
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     return logger
 
 
@@ -99,7 +100,7 @@ def main() -> int:
 
 
 def send_ping(logger: logging.Logger) -> None:
-    claude_bin = shutil.which("claude")
+    claude_bin = resolve_claude_bin()
     if not claude_bin:
         raise RuntimeError("Could not find 'claude' on PATH")
 
@@ -131,6 +132,22 @@ def send_ping(logger: logging.Logger) -> None:
         logger.info("Claude Code ping completed: %s", first_line(output))
     else:
         logger.info("Claude Code ping completed with no textual output")
+
+
+def resolve_claude_bin() -> str | None:
+    path_hit = shutil.which("claude")
+    if path_hit:
+        return path_hit
+
+    candidates = (
+        Path.home() / ".local" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
+        Path("/usr/bin/claude"),
+    )
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def wait_for_confirmed_next_weekly_reset(
