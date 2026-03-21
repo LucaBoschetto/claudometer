@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
 
+from config import load_config, write_runtime_env_values
 from db import UsageDB
 
 
@@ -23,6 +24,10 @@ def start_dashboard_server(
     expected_weekly_line_enabled: bool,
     expected_active_start_hhmm: str,
     expected_active_end_hhmm: str,
+    notify_session_threshold_pct: float | None,
+    notify_weekly_threshold_pct: float | None,
+    notify_extra_threshold_pct: float | None,
+    notify_expected_weekly_overrun_enabled: bool,
 ) -> ThreadingHTTPServer:
     handler_cls = _build_handler(
         db,
@@ -30,6 +35,10 @@ def start_dashboard_server(
         expected_weekly_line_enabled,
         expected_active_start_hhmm,
         expected_active_end_hhmm,
+        notify_session_threshold_pct,
+        notify_weekly_threshold_pct,
+        notify_extra_threshold_pct,
+        notify_expected_weekly_overrun_enabled,
     )
     server = ReusableThreadingHTTPServer((host, port), handler_cls)
 
@@ -46,6 +55,10 @@ def _build_handler(
     expected_weekly_line_enabled: bool,
     expected_active_start_hhmm: str,
     expected_active_end_hhmm: str,
+    notify_session_threshold_pct: float | None,
+    notify_weekly_threshold_pct: float | None,
+    notify_extra_threshold_pct: float | None,
+    notify_expected_weekly_overrun_enabled: bool,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -60,6 +73,10 @@ def _build_handler(
                         expected_weekly_line_enabled,
                         expected_active_start_hhmm,
                         expected_active_end_hhmm,
+                        notify_session_threshold_pct,
+                        notify_weekly_threshold_pct,
+                        notify_extra_threshold_pct,
+                        notify_expected_weekly_overrun_enabled,
                     )
                 )
                 return
@@ -71,10 +88,57 @@ def _build_handler(
             if self.path == "/data.json":
                 payload = db.fetch_chart_data()
                 payload["poll_interval_seconds"] = poll_interval_seconds
+                current_config = load_config()
+                payload["notification_settings"] = {
+                    "session_threshold_pct": current_config.notify_session_threshold_pct,
+                    "weekly_threshold_pct": current_config.notify_weekly_threshold_pct,
+                    "extra_threshold_pct": current_config.notify_extra_threshold_pct,
+                    "expected_weekly_overrun_enabled": current_config.notify_expected_weekly_overrun_enabled,
+                }
                 self._respond_json(payload)
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path != "/notification-settings":
+                self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+                return
+
+            try:
+                payload = self._read_json_body()
+                normalized = _normalize_notification_settings(payload)
+                write_runtime_env_values(
+                    {
+                        "NOTIFY_SESSION_THRESHOLD_PCT": normalized["session_threshold_pct"],
+                        "NOTIFY_WEEKLY_THRESHOLD_PCT": normalized["weekly_threshold_pct"],
+                        "NOTIFY_EXTRA_THRESHOLD_PCT": normalized["extra_threshold_pct"],
+                        "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": normalized[
+                            "expected_weekly_overrun_enabled"
+                        ],
+                    }
+                )
+            except ValueError as exc:
+                self._respond_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._respond_json({"error": f"Could not save settings: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+
+            self._respond_json(
+                {
+                    "ok": True,
+                    "notification_settings": {
+                        "session_threshold_pct": _as_number_or_none(normalized["session_threshold_pct"]),
+                        "weekly_threshold_pct": _as_number_or_none(normalized["weekly_threshold_pct"]),
+                        "extra_threshold_pct": _as_number_or_none(normalized["extra_threshold_pct"]),
+                        "expected_weekly_overrun_enabled": normalized[
+                            "expected_weekly_overrun_enabled"
+                        ]
+                        == "true",
+                    },
+                }
+            )
 
         def log_message(self, fmt: str, *args: Any) -> None:
             return
@@ -100,14 +164,72 @@ def _build_handler(
             self.end_headers()
             self.wfile.write(body.encode("utf-8"))
 
-        def _respond_json(self, payload: dict[str, Any]) -> None:
-            self.send_response(HTTPStatus.OK)
+        def _respond_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
 
+        def _read_json_body(self) -> dict[str, Any]:
+            raw_length = self.headers.get("Content-Length", "0")
+            try:
+                length = int(raw_length)
+            except ValueError as exc:
+                raise ValueError("Invalid request length") from exc
+            body = self.rfile.read(length)
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ValueError("Invalid JSON payload") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("JSON payload must be an object")
+            return payload
+
     return DashboardHandler
+
+
+def _normalize_threshold_value(raw: Any, label: str) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return ""
+    else:
+        value = str(raw).strip()
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a number between 0 and 100") from exc
+
+    if parsed < 0 or parsed > 100:
+        raise ValueError(f"{label} must be between 0 and 100")
+    return f"{parsed:.1f}".rstrip("0").rstrip(".")
+
+
+def _normalize_notification_settings(payload: dict[str, Any]) -> dict[str, str]:
+    return {
+        "session_threshold_pct": _normalize_threshold_value(
+            payload.get("session_threshold_pct"), "Session threshold"
+        ),
+        "weekly_threshold_pct": _normalize_threshold_value(
+            payload.get("weekly_threshold_pct"), "Weekly threshold"
+        ),
+        "extra_threshold_pct": _normalize_threshold_value(
+            payload.get("extra_threshold_pct"), "Extra usage threshold"
+        ),
+        "expected_weekly_overrun_enabled": "true"
+        if bool(payload.get("expected_weekly_overrun_enabled"))
+        else "false",
+    }
+
+
+def _as_number_or_none(raw: str) -> float | None:
+    if not raw:
+        return None
+    return float(raw)
 
 
 def _index_html(poll_interval_seconds: int) -> str:
@@ -149,6 +271,7 @@ def _index_html(poll_interval_seconds: int) -> str:
         </div>
 
         <div class="control-actions">
+          <button id="notifications-toggle" title="Enable browser alerts" aria-label="Enable browser alerts">Alerts</button>
           <button id="y-reset" title="Reset Y axis zoom (0-100)" aria-label="Reset Y axis zoom (0-100)">Reset Y</button>
           <button id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">Light</button>
         </div>
@@ -162,6 +285,10 @@ def _index_html(poll_interval_seconds: int) -> str:
           <h2>Usage history</h2>
         </div>
       </div>
+      <div id="chart-loading" class="chart-loading" aria-live="polite">
+        <div class="chart-spinner" aria-hidden="true"></div>
+        <span>Loading usage data…</span>
+      </div>
       <div id="chart" aria-label="usage chart"></div>
     </section>
 
@@ -171,6 +298,10 @@ def _index_html(poll_interval_seconds: int) -> str:
           <p class="panel-kicker">Current state</p>
           <h2>Summary</h2>
         </div>
+        <div class="panel-actions">
+          <span id="save-alert-status" aria-live="polite"></span>
+          <button id="save-alert-settings" type="button" disabled>Save Alerts</button>
+        </div>
       </div>
       <table id="summary-table">
         <thead>
@@ -178,6 +309,7 @@ def _index_html(poll_interval_seconds: int) -> str:
             <th>Metric</th>
             <th>Usage</th>
             <th>Resets At (Local)</th>
+            <th>Alert</th>
           </tr>
         </thead>
         <tbody id="summary-body"></tbody>
@@ -326,12 +458,98 @@ h2 {
   gap: 12px;
   padding: 18px 20px 0 20px;
 }
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+.panel-actions button,
+.alert-control input,
+.alert-control button {
+  border: 1px solid var(--line);
+  background: var(--card-strong);
+  color: var(--fg);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  min-height: 40px;
+}
+.panel-actions button,
+.alert-control button {
+  cursor: pointer;
+  font-weight: 700;
+}
+.panel-actions button:disabled,
+.controls button:disabled,
+.alert-control button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  color: var(--muted);
+  border-color: var(--line);
+  box-shadow: none;
+}
+#save-alert-status {
+  min-height: 1.2rem;
+  font-size: 0.84rem;
+}
+.alert-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.alert-control input[type="number"] {
+  width: 88px;
+}
+.alert-control label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+.alert-control input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
 .chart-panel {
   overflow: hidden;
+  position: relative;
 }
 #chart {
   min-height: clamp(320px, 58vh, 560px);
   padding: 4px 6px 0 6px;
+}
+.chart-loading {
+  position: absolute;
+  inset: 70px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  background: linear-gradient(180deg, rgba(7, 17, 27, 0.08), rgba(7, 17, 27, 0.18));
+  backdrop-filter: blur(2px);
+  z-index: 2;
+  transition: opacity 0.2s ease;
+}
+.chart-loading.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.chart-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.14);
+  border-top-color: var(--accent);
+  animation: chart-spin 0.9s linear infinite;
+}
+@keyframes chart-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 #summary-wrap {
   margin-top: 14px;
@@ -382,10 +600,18 @@ h2 {
   }
   .panel-header {
     padding: 16px 16px 0 16px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .panel-actions {
+    justify-content: space-between;
   }
   #chart {
     min-height: min(60vh, 420px);
     padding: 0;
+  }
+  .chart-loading {
+    inset: 62px 0 0 0;
   }
   #summary-table thead {
     display: none;
@@ -441,25 +667,40 @@ def _app_js(
     expected_weekly_line_enabled: bool,
     expected_active_start_hhmm: str,
     expected_active_end_hhmm: str,
+    notify_session_threshold_pct: float | None,
+    notify_weekly_threshold_pct: float | None,
+    notify_extra_threshold_pct: float | None,
+    notify_expected_weekly_overrun_enabled: bool,
 ) -> str:
     poll_ms = poll_interval_seconds * 1000
     js = """
 const chartEl = document.getElementById('chart');
+const chartLoadingEl = document.getElementById('chart-loading');
 const statusEl = document.getElementById('status');
 const summaryBodyEl = document.getElementById('summary-body');
 const viewModeEl = document.getElementById('view-mode');
 const rangePresetEl = document.getElementById('range-preset');
+const notificationsToggleEl = document.getElementById('notifications-toggle');
+const saveAlertSettingsEl = document.getElementById('save-alert-settings');
+const saveAlertStatusEl = document.getElementById('save-alert-status');
 const yResetEl = document.getElementById('y-reset');
 const themeToggleEl = document.getElementById('theme-toggle');
 
 const expectedLineEnabled = __EXPECTED_LINE_ENABLED__;
 const expectedActiveStart = '__EXPECTED_ACTIVE_START__';
 const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
+let notifySessionThresholdPct = __NOTIFY_SESSION_THRESHOLD_PCT__;
+let notifyWeeklyThresholdPct = __NOTIFY_WEEKLY_THRESHOLD_PCT__;
+let notifyExtraThresholdPct = __NOTIFY_EXTRA_THRESHOLD_PCT__;
+let notifyExpectedWeeklyOverrunEnabled = __NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__;
 
 let hasInitializedXRange = false;
 let hasBoundRelayout = false;
 let userXRange = null;
 let currentTotalSamples = 0;
+let alertSettingsDirty = false;
+let saveAlertStatusTimer = null;
+let hasLoadedInitialData = false;
 
 
 function storageGet(key, fallback) {
@@ -479,10 +720,26 @@ function storageSet(key, value) {
   }
 }
 
+function storageGetJson(key, fallback) {
+  const raw = storageGet(key, null);
+  if (raw === null) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
 let currentRows = [];
 let viewMode = storageGet('tracker_view_mode', 'raw');
 let rangePreset = storageGet('tracker_range_preset', 'weekly_cycle');
 let themeMode = storageGet('tracker_theme_mode', 'dark');
+let alertSettingsDraft = {
+  session_threshold_pct: notifySessionThresholdPct,
+  weekly_threshold_pct: notifyWeeklyThresholdPct,
+  extra_threshold_pct: notifyExtraThresholdPct,
+  expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled
+};
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -505,6 +762,100 @@ function formatLocalDateTimeFull(rawTs) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+function thresholdsConfigured() {
+  return (
+    notifySessionThresholdPct !== null ||
+    notifyWeeklyThresholdPct !== null ||
+    notifyExtraThresholdPct !== null ||
+    notifyExpectedWeeklyOverrunEnabled
+  );
+}
+
+function notificationsSupported() {
+  return typeof window !== 'undefined' && 'Notification' in window;
+}
+
+function updateNotificationsToggle() {
+  if (!notificationsSupported()) {
+    notificationsToggleEl.hidden = true;
+    return;
+  }
+  notificationsToggleEl.hidden = false;
+  if (Notification.permission === 'granted') {
+    notificationsToggleEl.textContent = 'Alerts On';
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    notificationsToggleEl.textContent = 'Alerts Blocked';
+    return;
+  }
+  notificationsToggleEl.textContent = thresholdsConfigured() ? 'Enable Alerts' : 'Alerts';
+}
+
+function setSaveAlertStatus(message, isError = false) {
+  if (saveAlertStatusTimer) {
+    clearTimeout(saveAlertStatusTimer);
+    saveAlertStatusTimer = null;
+  }
+  saveAlertStatusEl.textContent = message;
+  saveAlertStatusEl.style.color = isError ? 'var(--accent-2)' : 'var(--muted)';
+}
+
+function setChartLoading(isLoading) {
+  if (!chartLoadingEl) return;
+  chartLoadingEl.classList.toggle('hidden', !isLoading);
+}
+
+function clearSaveAlertStatusLater() {
+  if (saveAlertStatusTimer) {
+    clearTimeout(saveAlertStatusTimer);
+  }
+  saveAlertStatusTimer = setTimeout(() => {
+    saveAlertStatusEl.textContent = '';
+    saveAlertStatusTimer = null;
+  }, 3500);
+}
+
+function fmtThresholdInput(value) {
+  return value === null || value === undefined || Number.isNaN(value) ? '' : String(value);
+}
+
+function syncAlertSettingsDraftFromRuntime() {
+  alertSettingsDraft = {
+    session_threshold_pct: notifySessionThresholdPct,
+    weekly_threshold_pct: notifyWeeklyThresholdPct,
+    extra_threshold_pct: notifyExtraThresholdPct,
+    expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled
+  };
+}
+
+function normalizedAlertSettingsSnapshot(settings) {
+  const normalizeThreshold = (value) => {
+    if (value === null || value === undefined || value === '') return '';
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? String(parsed) : String(value).trim();
+  };
+  return JSON.stringify({
+    session_threshold_pct: normalizeThreshold(settings.session_threshold_pct),
+    weekly_threshold_pct: normalizeThreshold(settings.weekly_threshold_pct),
+    extra_threshold_pct: normalizeThreshold(settings.extra_threshold_pct),
+    expected_weekly_overrun_enabled: !!settings.expected_weekly_overrun_enabled
+  });
+}
+
+function refreshSaveAlertButton() {
+  const runtimeSettings = {
+    session_threshold_pct: notifySessionThresholdPct,
+    weekly_threshold_pct: notifyWeeklyThresholdPct,
+    extra_threshold_pct: notifyExtraThresholdPct,
+    expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled
+  };
+  alertSettingsDirty =
+    normalizedAlertSettingsSnapshot(alertSettingsDraft) !==
+    normalizedAlertSettingsSnapshot(runtimeSettings);
+  saveAlertSettingsEl.disabled = !alertSettingsDirty;
+}
+
 function toLocalPlotTs(rawTs) {
   const d = new Date(rawTs);
   if (Number.isNaN(d.getTime())) return rawTs;
@@ -519,20 +870,184 @@ function renderSummaryTable(latest, expectedNowPct) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
   const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
   const rows = [
-    ['Current session', fmtPct(latest ? latest.session_pct : null), fmtReset(latest ? latest.session_resets : null)],
-    ['Weekly', fmtPct(latest ? latest.weekly_pct : null), fmtReset(latest ? latest.weekly_resets : null)],
-    [extraMetricLabel, fmtPct(latest ? latest.extra_pct : null), ''],
-    ['Expected weekly usage (now)', fmtPct(expectedNowPct), '']
+    {
+      metric: 'Current session',
+      usage: fmtPct(latest ? latest.session_pct : null),
+      reset: fmtReset(latest ? latest.session_resets : null),
+      alert: `
+        <div class="alert-control">
+          <input type="number" min="0" max="100" step="0.1" placeholder="Off"
+            data-alert-setting="session_threshold_pct"
+            value="${fmtThresholdInput(alertSettingsDraft.session_threshold_pct)}" />
+          <span>%</span>
+        </div>
+      `
+    },
+    {
+      metric: 'Weekly',
+      usage: fmtPct(latest ? latest.weekly_pct : null),
+      reset: fmtReset(latest ? latest.weekly_resets : null),
+      alert: `
+        <div class="alert-control">
+          <input type="number" min="0" max="100" step="0.1" placeholder="Off"
+            data-alert-setting="weekly_threshold_pct"
+            value="${fmtThresholdInput(alertSettingsDraft.weekly_threshold_pct)}" />
+          <span>%</span>
+        </div>
+      `
+    },
+    {
+      metric: extraMetricLabel,
+      usage: fmtPct(latest ? latest.extra_pct : null),
+      reset: '-',
+      alert: `
+        <div class="alert-control">
+          <input type="number" min="0" max="100" step="0.1" placeholder="Off"
+            data-alert-setting="extra_threshold_pct"
+            value="${fmtThresholdInput(alertSettingsDraft.extra_threshold_pct)}" />
+          <span>%</span>
+        </div>
+      `
+    },
+    {
+      metric: 'Expected weekly usage (now)',
+      usage: fmtPct(expectedNowPct),
+      reset: '-',
+      alert: `
+        <div class="alert-control">
+          <label>
+            <input type="checkbox"
+              data-alert-setting="expected_weekly_overrun_enabled"
+              ${alertSettingsDraft.expected_weekly_overrun_enabled ? 'checked' : ''} />
+            Alert
+          </label>
+        </div>
+      `
+    }
   ];
   summaryBodyEl.innerHTML = rows
     .map((row) => `
       <tr>
-        <td data-cell="metric">${row[0]}</td>
-        <td data-label="Usage">${row[1]}</td>
-        <td data-label="Resets At (Local)">${row[2] || '-'}</td>
+        <td data-cell="metric">${row.metric}</td>
+        <td data-label="Usage">${row.usage}</td>
+        <td data-label="Resets At (Local)">${row.reset || '-'}</td>
+        <td data-label="Alert">${row.alert}</td>
       </tr>
     `)
     .join('');
+}
+
+function notificationState() {
+  return storageGetJson('tracker_notification_state', {});
+}
+
+function setNotificationState(state) {
+  storageSet('tracker_notification_state', JSON.stringify(state));
+}
+
+function showNotification(title, body, tag) {
+  if (!notificationsSupported() || Notification.permission !== 'granted') return;
+  try {
+    new Notification(title, { body, tag });
+  } catch (_err) {
+    // Ignore notification delivery errors.
+  }
+}
+
+function maybeNotifyThresholds(latest, expectedNowPct) {
+  if (!latest || !notificationsSupported() || Notification.permission !== 'granted') return;
+
+  const state = notificationState();
+
+  maybeNotifyThresholdCrossing(
+    state,
+    'session',
+    latest.session_pct,
+    notifySessionThresholdPct,
+    latest.session_resets || 'unknown',
+    'Claudometer: session usage alert',
+    `Current session usage reached ${fmtPct(latest.session_pct)}.`
+  );
+
+  maybeNotifyThresholdCrossing(
+    state,
+    'weekly',
+    latest.weekly_pct,
+    notifyWeeklyThresholdPct,
+    latest.weekly_resets || 'unknown',
+    'Claudometer: weekly usage alert',
+    `Weekly usage reached ${fmtPct(latest.weekly_pct)}.`
+  );
+
+  maybeNotifyThresholdCrossing(
+    state,
+    'extra',
+    latest.extra_pct,
+    notifyExtraThresholdPct,
+    latest.extra_monthly_limit || 'extra',
+    'Claudometer: extra usage alert',
+    `Extra usage reached ${fmtPct(latest.extra_pct)}.`
+  );
+
+  maybeNotifyExpectedOverrun(state, latest, expectedNowPct);
+
+  setNotificationState(state);
+}
+
+function maybeNotifyThresholdCrossing(state, key, currentValue, threshold, marker, title, bodyPrefix) {
+  if (threshold === null || currentValue === null || currentValue === undefined) return;
+  const entryKey = `${threshold}:${marker || 'unknown'}`;
+  const entry = state[key] || {};
+
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (currentValue >= threshold) {
+    if (!entry.alerted) {
+      showNotification(title, `${bodyPrefix} Threshold ${fmtPct(threshold)}.`, `${key}:${entryKey}`);
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state[key] = entry;
+}
+
+function maybeNotifyExpectedOverrun(state, latest, expectedNowPct) {
+  if (
+    !notifyExpectedWeeklyOverrunEnabled ||
+    latest.weekly_pct === null ||
+    latest.weekly_pct === undefined ||
+    expectedNowPct === null ||
+    expectedNowPct === undefined
+  ) {
+    return;
+  }
+
+  const entryKey = latest.weekly_resets || 'unknown';
+  const entry = state.expectedOverrun || {};
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (latest.weekly_pct > expectedNowPct) {
+    if (!entry.alerted) {
+      showNotification(
+        'Claudometer: weekly usage above expected',
+        `Weekly usage is ${fmtPct(latest.weekly_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
+        `expected-overrun:${entryKey}`
+      );
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state.expectedOverrun = entry;
 }
 
 function buildShapes(rows) {
@@ -757,6 +1272,7 @@ function applyTheme() {
   document.body.classList.remove('theme-light', 'theme-dark');
   document.body.classList.add(theme.bodyClass);
   themeToggleEl.textContent = themeMode === 'light' ? 'Dark' : 'Light';
+  updateNotificationsToggle();
 }
 
 function isCompactViewport() {
@@ -829,6 +1345,98 @@ function bindControls() {
     renderChart(currentRows);
   });
 
+  notificationsToggleEl.addEventListener('click', async () => {
+    if (!notificationsSupported()) return;
+    if (Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch (_err) {
+        // Ignore permission request failures.
+      }
+    }
+    updateNotificationsToggle();
+  });
+
+  summaryBodyEl.addEventListener('input', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const setting = target.dataset.alertSetting;
+    if (!setting) return;
+    if (target.type === 'checkbox') {
+      alertSettingsDraft[setting] = target.checked;
+    } else {
+      const raw = target.value.trim();
+      alertSettingsDraft[setting] = raw === '' ? null : raw;
+    }
+    refreshSaveAlertButton();
+    setSaveAlertStatus('Unsaved alert settings');
+  });
+
+  summaryBodyEl.addEventListener('change', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const setting = target.dataset.alertSetting;
+    if (!setting) return;
+    if (target.type === 'checkbox') {
+      alertSettingsDraft[setting] = target.checked;
+      refreshSaveAlertButton();
+      setSaveAlertStatus('Unsaved alert settings');
+    }
+  });
+
+  saveAlertSettingsEl.addEventListener('click', saveAlertSettings);
+
+}
+
+async function saveAlertSettings() {
+  saveAlertSettingsEl.disabled = true;
+  setSaveAlertStatus('Saving...');
+  try {
+    const payload = {
+      session_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.session_threshold_pct),
+      weekly_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.weekly_threshold_pct),
+      extra_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.extra_threshold_pct),
+      expected_weekly_overrun_enabled: !!alertSettingsDraft.expected_weekly_overrun_enabled
+    };
+    const res = await fetch('/notification-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+    applyNotificationSettings(body.notification_settings, true);
+    renderChart(currentRows);
+    setSaveAlertStatus('Alert settings saved');
+    clearSaveAlertStatusLater();
+  } catch (err) {
+    setSaveAlertStatus('Save failed: ' + err, true);
+  } finally {
+    refreshSaveAlertButton();
+  }
+}
+
+function normalizeDraftThreshold(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) ? parsed : rawValue;
+}
+
+function applyNotificationSettings(settings, fromSave = false) {
+  notifySessionThresholdPct = settings.session_threshold_pct ?? null;
+  notifyWeeklyThresholdPct = settings.weekly_threshold_pct ?? null;
+  notifyExtraThresholdPct = settings.extra_threshold_pct ?? null;
+  notifyExpectedWeeklyOverrunEnabled = !!settings.expected_weekly_overrun_enabled;
+  if (!alertSettingsDirty || fromSave) {
+    syncAlertSettingsDraftFromRuntime();
+  }
+  if (fromSave) {
+    alertSettingsDirty = false;
+  }
+  updateNotificationsToggle();
+  refreshSaveAlertButton();
 }
 
 function renderChart(rows) {
@@ -911,6 +1519,7 @@ function renderChart(rows) {
     ' | Polling interval: __POLL_INTERVAL_SECONDS__s' +
     ' | Last sample: ' + formatLocalDateTimeFull(latest.ts);
   renderSummaryTable(latest, expectedData ? expectedData.expectedNowPct : null);
+  maybeNotifyThresholds(latest, expectedData ? expectedData.expectedNowPct : null);
 
   const xaxisLayout = {
     title: compact ? null : 'Time (Local)',
@@ -947,17 +1556,26 @@ function renderChart(rows) {
 
   ensureRelayoutBinding();
   hasInitializedXRange = true;
+  hasLoadedInitialData = true;
+  setChartLoading(false);
 }
 
 async function refreshData() {
   try {
+    if (!hasLoadedInitialData) {
+      setChartLoading(true);
+    }
     const res = await fetch('/data.json', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const payload = await res.json();
+    if (payload.notification_settings) {
+      applyNotificationSettings(payload.notification_settings);
+    }
     currentRows = payload.rows || [];
     currentTotalSamples = payload.total_samples || currentRows.length;
     renderChart(currentRows);
   } catch (err) {
+    setChartLoading(false);
     statusEl.textContent = 'Data fetch failed: ' + err;
   }
 }
@@ -974,4 +1592,20 @@ setInterval(refreshData, __POLL_MS__);
         .replace("__EXPECTED_LINE_ENABLED__", "true" if expected_weekly_line_enabled else "false")
         .replace("__EXPECTED_ACTIVE_START__", expected_active_start_hhmm)
         .replace("__EXPECTED_ACTIVE_END__", expected_active_end_hhmm)
+        .replace(
+            "__NOTIFY_SESSION_THRESHOLD_PCT__",
+            "null" if notify_session_threshold_pct is None else str(float(notify_session_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_WEEKLY_THRESHOLD_PCT__",
+            "null" if notify_weekly_threshold_pct is None else str(float(notify_weekly_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_EXTRA_THRESHOLD_PCT__",
+            "null" if notify_extra_threshold_pct is None else str(float(notify_extra_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__",
+            "true" if notify_expected_weekly_overrun_enabled else "false",
+        )
     )

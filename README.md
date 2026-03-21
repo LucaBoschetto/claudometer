@@ -131,6 +131,10 @@ Set these in `~/.claude-usage-tracker/config.env`:
 - `EXPECTED_WEEKLY_LINE_ENABLED=true|false` (default `true`)
 - `EXPECTED_ACTIVE_START_HHMM=08:00` (default)
 - `EXPECTED_ACTIVE_END_HHMM=19:00` (default)
+- `NOTIFY_SESSION_THRESHOLD_PCT=` (empty by default; disabled)
+- `NOTIFY_WEEKLY_THRESHOLD_PCT=` (empty by default; disabled)
+- `NOTIFY_EXTRA_THRESHOLD_PCT=` (empty by default; disabled)
+- `NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED=true|false` (default `false`)
 - `AUTH_BROWSER=chrome|chromium|firefox|webkit` (default `chrome`)
 
 Behavior:
@@ -138,6 +142,10 @@ Behavior:
 - Dashed line progresses only during the active daily window
 - Reaches `100%` at next weekly reset
 - Summary line under the chart shows `Expected weekly usage (now)`
+- Optional browser notifications can fire when current session, weekly usage, or extra usage crosses configured percentages
+- Optional browser notifications can fire when weekly usage rises above the expected weekly usage line
+- Browser notifications require the dashboard page to be open and permission to be granted
+- Alert thresholds can also be edited in the dashboard summary table and saved back to `config.env`
 
 ## Weekly Ping Utility
 

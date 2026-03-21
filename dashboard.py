@@ -82,6 +82,10 @@ def main() -> None:
         expected_weekly_line_enabled=config.expected_weekly_line_enabled,
         expected_active_start_hhmm=config.expected_active_start_hhmm,
         expected_active_end_hhmm=config.expected_active_end_hhmm,
+        notify_session_threshold_pct=config.notify_session_threshold_pct,
+        notify_weekly_threshold_pct=config.notify_weekly_threshold_pct,
+        notify_extra_threshold_pct=config.notify_extra_threshold_pct,
+        notify_expected_weekly_overrun_enabled=config.notify_expected_weekly_overrun_enabled,
     )
 
     try:
