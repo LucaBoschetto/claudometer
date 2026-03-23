@@ -271,7 +271,6 @@ def _index_html(poll_interval_seconds: int) -> str:
         </div>
 
         <div class="control-actions">
-          <button id="notifications-toggle" title="Enable browser alerts" aria-label="Enable browser alerts">Alerts</button>
           <button id="y-reset" title="Reset Y axis zoom (0-100)" aria-label="Reset Y axis zoom (0-100)">Reset Y</button>
           <button id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">Light</button>
         </div>
@@ -300,6 +299,10 @@ def _index_html(poll_interval_seconds: int) -> str:
         </div>
         <div class="panel-actions">
           <span id="save-alert-status" aria-live="polite"></span>
+          <label id="notifications-toggle-wrap" class="toggle-chip" title="Enable browser alerts">
+            <input id="notifications-toggle" type="checkbox" aria-label="Alerts enabled" />
+            <span id="notifications-toggle-text">Alerts enabled</span>
+          </label>
           <button id="save-alert-settings" type="button" disabled>Save Alerts</button>
         </div>
       </div>
@@ -462,6 +465,32 @@ h2 {
   display: flex;
   align-items: center;
   gap: 10px;
+  color: var(--muted);
+}
+.toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--card-strong);
+  color: var(--fg);
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-height: 40px;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+.toggle-chip input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.toggle-chip.is-disabled {
+  opacity: 0.68;
+}
+.toggle-chip.is-blocked {
+  opacity: 0.68;
   color: var(--muted);
 }
 .panel-actions button,
@@ -681,6 +710,8 @@ const summaryBodyEl = document.getElementById('summary-body');
 const viewModeEl = document.getElementById('view-mode');
 const rangePresetEl = document.getElementById('range-preset');
 const notificationsToggleEl = document.getElementById('notifications-toggle');
+const notificationsToggleWrapEl = document.getElementById('notifications-toggle-wrap');
+const notificationsToggleTextEl = document.getElementById('notifications-toggle-text');
 const saveAlertSettingsEl = document.getElementById('save-alert-settings');
 const saveAlertStatusEl = document.getElementById('save-alert-status');
 const yResetEl = document.getElementById('y-reset');
@@ -701,6 +732,7 @@ let currentTotalSamples = 0;
 let alertSettingsDirty = false;
 let saveAlertStatusTimer = null;
 let hasLoadedInitialData = false;
+let alertsEnabled = storageGet('tracker_alerts_enabled', 'false') === 'true';
 
 
 function storageGet(key, fallback) {
@@ -777,19 +809,31 @@ function notificationsSupported() {
 
 function updateNotificationsToggle() {
   if (!notificationsSupported()) {
-    notificationsToggleEl.hidden = true;
+    notificationsToggleWrapEl.hidden = true;
     return;
   }
-  notificationsToggleEl.hidden = false;
+  notificationsToggleWrapEl.hidden = false;
+  notificationsToggleWrapEl.classList.remove('is-disabled', 'is-blocked');
   if (Notification.permission === 'granted') {
-    notificationsToggleEl.textContent = 'Alerts On';
+    notificationsToggleEl.disabled = false;
+    notificationsToggleEl.checked = alertsEnabled;
+    notificationsToggleTextEl.textContent = 'Alerts enabled';
+    if (!alertsEnabled) {
+      notificationsToggleWrapEl.classList.add('is-disabled');
+    }
     return;
   }
   if (Notification.permission === 'denied') {
-    notificationsToggleEl.textContent = 'Alerts Blocked';
+    notificationsToggleEl.checked = false;
+    notificationsToggleEl.disabled = true;
+    notificationsToggleTextEl.textContent = 'Alerts blocked';
+    notificationsToggleWrapEl.classList.add('is-blocked');
     return;
   }
-  notificationsToggleEl.textContent = thresholdsConfigured() ? 'Enable Alerts' : 'Alerts';
+  notificationsToggleEl.checked = false;
+  notificationsToggleEl.disabled = false;
+  notificationsToggleTextEl.textContent = thresholdsConfigured() ? 'Alerts enabled' : 'Alerts enabled';
+  notificationsToggleWrapEl.classList.add('is-disabled');
 }
 
 function setSaveAlertStatus(message, isError = false) {
@@ -946,7 +990,7 @@ function setNotificationState(state) {
 }
 
 function showNotification(title, body, tag) {
-  if (!notificationsSupported() || Notification.permission !== 'granted') return;
+  if (!notificationsSupported() || Notification.permission !== 'granted' || !alertsEnabled) return;
   try {
     new Notification(title, { body, tag });
   } catch (_err) {
@@ -954,8 +998,19 @@ function showNotification(title, body, tag) {
   }
 }
 
+function latestExpectedNowPct(rows) {
+  const expectedData = computeExpectedWeeklyTrace(rows);
+  return expectedData ? expectedData.expectedNowPct : null;
+}
+
+function evaluateThresholdNotificationsNow() {
+  if (!currentRows.length) return;
+  const latest = currentRows[currentRows.length - 1];
+  maybeNotifyThresholds(latest, latestExpectedNowPct(currentRows));
+}
+
 function maybeNotifyThresholds(latest, expectedNowPct) {
-  if (!latest || !notificationsSupported() || Notification.permission !== 'granted') return;
+  if (!latest || !notificationsSupported() || Notification.permission !== 'granted' || !alertsEnabled) return;
 
   const state = notificationState();
 
@@ -1345,8 +1400,28 @@ function bindControls() {
     renderChart(currentRows);
   });
 
-  notificationsToggleEl.addEventListener('click', async () => {
+  notificationsToggleEl.addEventListener('change', async () => {
     if (!notificationsSupported()) return;
+    if (Notification.permission === 'granted') {
+      alertsEnabled = notificationsToggleEl.checked;
+      storageSet('tracker_alerts_enabled', alertsEnabled ? 'true' : 'false');
+      updateNotificationsToggle();
+      if (alertsEnabled) {
+        showNotification(
+          'Claudometer alerts enabled',
+          'Browser notifications are on for this dashboard.',
+          'alerts-enabled'
+        );
+        evaluateThresholdNotificationsNow();
+      }
+      return;
+    }
+    if (!notificationsToggleEl.checked) {
+      alertsEnabled = false;
+      storageSet('tracker_alerts_enabled', 'false');
+      updateNotificationsToggle();
+      return;
+    }
     if (Notification.permission === 'default') {
       try {
         await Notification.requestPermission();
@@ -1354,7 +1429,21 @@ function bindControls() {
         // Ignore permission request failures.
       }
     }
+    if (Notification.permission === 'granted') {
+      alertsEnabled = true;
+      storageSet('tracker_alerts_enabled', 'true');
+    } else {
+      notificationsToggleEl.checked = false;
+    }
     updateNotificationsToggle();
+    if (Notification.permission === 'granted' && alertsEnabled) {
+      showNotification(
+        'Claudometer alerts enabled',
+        'Browser notifications are on for this dashboard.',
+        'alerts-enabled'
+      );
+      evaluateThresholdNotificationsNow();
+    }
   });
 
   summaryBodyEl.addEventListener('input', (evt) => {
@@ -1437,6 +1526,9 @@ function applyNotificationSettings(settings, fromSave = false) {
   }
   updateNotificationsToggle();
   refreshSaveAlertButton();
+  if (fromSave && Notification.permission === 'granted') {
+    evaluateThresholdNotificationsNow();
+  }
 }
 
 function renderChart(rows) {
