@@ -4,6 +4,7 @@ import json
 import logging
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from threading import Thread
 from typing import Any
 
@@ -62,11 +63,14 @@ def _build_handler(
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/":
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/":
                 self._respond_html(_index_html(poll_interval_seconds))
                 return
 
-            if self.path == "/app.js":
+            if path == "/app.js":
                 self._respond_js(
                     _app_js(
                         poll_interval_seconds,
@@ -81,12 +85,14 @@ def _build_handler(
                 )
                 return
 
-            if self.path == "/app.css":
+            if path == "/app.css":
                 self._respond_css(_app_css())
                 return
 
-            if self.path == "/data.json":
-                payload = db.fetch_chart_data()
+            if path == "/data.json":
+                query = parse_qs(parsed.query)
+                range_preset = (query.get("range") or ["all"])[0]
+                payload = db.fetch_chart_data(range_preset)
                 payload["poll_interval_seconds"] = poll_interval_seconds
                 current_config = load_config()
                 payload["notification_settings"] = {
@@ -766,6 +772,7 @@ let currentRows = [];
 let viewMode = storageGet('tracker_view_mode', 'raw');
 let rangePreset = storageGet('tracker_range_preset', 'weekly_cycle');
 let themeMode = storageGet('tracker_theme_mode', 'dark');
+let dataRangePreset = (rangePreset === 'manual') ? 'weekly_cycle' : rangePreset;
 let alertSettingsDraft = {
   session_threshold_pct: notifySessionThresholdPct,
   weekly_threshold_pct: notifyWeeklyThresholdPct,
@@ -1353,6 +1360,12 @@ function effectiveRangePreset() {
   return rangePreset;
 }
 
+function backendRangePreset() {
+  const preset = effectiveRangePreset();
+  if (preset === 'manual') return dataRangePreset || 'weekly_cycle';
+  return preset;
+}
+
 
 function ensureRelayoutBinding() {
   if (hasBoundRelayout) return;
@@ -1380,6 +1393,7 @@ function bindControls() {
   viewModeEl.value = viewMode;
   rangePresetEl.value = effectiveRangePreset();
   applyTheme();
+  dataRangePreset = backendRangePreset();
 
   viewModeEl.addEventListener('change', () => {
     viewMode = viewModeEl.value;
@@ -1396,7 +1410,12 @@ function bindControls() {
       rangePresetEl.value = rangePreset;
       storageSet('tracker_range_preset', rangePreset);
     }
-    rerenderChartWithLoading(currentRows);
+    if (rangePreset === 'manual') {
+      rerenderChartWithLoading(currentRows);
+      return;
+    }
+    dataRangePreset = rangePreset;
+    refreshData();
   });
 
   yResetEl.addEventListener('click', () => {
@@ -1677,7 +1696,8 @@ function renderChart(rows) {
 async function refreshData() {
   try {
     setChartLoading(true);
-    const res = await fetch('/data.json', { cache: 'no-store' });
+    const params = new URLSearchParams({ range: backendRangePreset() });
+    const res = await fetch('/data.json?' + params.toString(), { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const payload = await res.json();
     if (payload.notification_settings) {

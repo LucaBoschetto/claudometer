@@ -132,39 +132,114 @@ class UsageDB:
                 )
             conn.commit()
 
-    def fetch_chart_data(self) -> dict[str, Any]:
+    def fetch_chart_data(self, range_preset: str = "all") -> dict[str, Any]:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            runs = conn.execute(
-                """
-                SELECT
-                  ts_start,
-                  ts_end,
-                  sample_count,
-                  session_pct,
-                  session_resets,
-                  weekly_pct,
-                  weekly_resets,
-                  extra_pct,
-                  extra_enabled,
-                  extra_used_credits,
-                  extra_monthly_limit
-                FROM usage_runs
-                ORDER BY ts_start ASC, id ASC
-                """
-            ).fetchall()
+            total_samples = int(
+                conn.execute("SELECT COALESCE(SUM(sample_count), 0) FROM usage_runs").fetchone()[0]
+            )
+            start_iso, end_iso = self._range_window(conn, range_preset)
+            if start_iso is None and end_iso is None:
+                runs = conn.execute(
+                    """
+                    SELECT
+                      ts_start,
+                      ts_end,
+                      sample_count,
+                      session_pct,
+                      session_resets,
+                      weekly_pct,
+                      weekly_resets,
+                      extra_pct,
+                      extra_enabled,
+                      extra_used_credits,
+                      extra_monthly_limit
+                    FROM usage_runs
+                    ORDER BY ts_start ASC, id ASC
+                    """
+                ).fetchall()
+            else:
+                runs = conn.execute(
+                    """
+                    SELECT
+                      ts_start,
+                      ts_end,
+                      sample_count,
+                      session_pct,
+                      session_resets,
+                      weekly_pct,
+                      weekly_resets,
+                      extra_pct,
+                      extra_enabled,
+                      extra_used_credits,
+                      extra_monthly_limit
+                    FROM usage_runs
+                    WHERE ts_end >= ? AND ts_start < ?
+                    ORDER BY ts_start ASC, id ASC
+                    """,
+                    (start_iso, end_iso),
+                ).fetchall()
 
         payload_runs = [self._run_row_to_dict(row) for row in runs]
         expanded_rows: list[dict[str, Any]] = []
-        total_samples = 0
+        filtered_samples = 0
         for run in payload_runs:
-            total_samples += int(run["sample_count"])
+            filtered_samples += int(run["sample_count"])
             expanded_rows.extend(self._expand_run(run))
         return {
             "rows": expanded_rows,
             "total_samples": total_samples,
+            "filtered_samples": filtered_samples,
             "run_count": len(payload_runs),
         }
+
+    def _range_window(
+        self, conn: sqlite3.Connection, range_preset: str
+    ) -> tuple[str | None, str | None]:
+        normalized = range_preset if range_preset in {"today", "weekly_cycle", "all"} else "all"
+        if normalized == "all":
+            return (None, None)
+
+        latest = conn.execute(
+            """
+            SELECT ts_end, weekly_resets
+            FROM usage_runs
+            ORDER BY ts_end DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest is None:
+            return (None, None)
+
+        latest_ts = _parse_iso(latest[0])
+        if latest_ts is None:
+            return (None, None)
+
+        if normalized == "today":
+            local_latest = latest_ts.astimezone()
+            local_start = local_latest.replace(hour=0, minute=0, second=0, microsecond=0)
+            local_end = local_start + timedelta(days=1)
+            return (
+                local_start.astimezone(timezone.utc).isoformat(),
+                local_end.astimezone(timezone.utc).isoformat(),
+            )
+
+        current_cycle_end = _parse_iso(latest[1])
+        if current_cycle_end is None:
+            return (None, None)
+        previous = conn.execute(
+            """
+            SELECT weekly_resets
+            FROM usage_runs
+            WHERE weekly_resets < ?
+            ORDER BY weekly_resets DESC, id DESC
+            LIMIT 1
+            """,
+            (current_cycle_end.isoformat(),),
+        ).fetchone()
+        previous_cycle_end = _parse_iso(previous[0]) if previous else None
+        cycle_start = previous_cycle_end or (current_cycle_end - timedelta(days=7))
+        return (cycle_start.isoformat(), current_cycle_end.isoformat())
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
