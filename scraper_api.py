@@ -52,7 +52,10 @@ class UsageAPIClient:
 
         payload = response.json()
         overage_payload = self._fetch_overage_payload(headers)
-        return parse_payload(payload, ts_iso, overage_payload)
+        sample = parse_payload(payload, ts_iso, overage_payload)
+        if sample.session_pct is None or sample.weekly_pct is None:
+            raise AuthRequiredError("Usage payload missing core utilization fields, auth likely expired")
+        return sample
 
     def _fetch_overage_payload(self, headers: dict[str, str]) -> dict[str, Any] | None:
         if not self.config.claude_org_id:

@@ -850,6 +850,15 @@ function setChartLoading(isLoading) {
   chartLoadingEl.classList.toggle('hidden', !isLoading);
 }
 
+function rerenderChartWithLoading(rows = currentRows) {
+  setChartLoading(true);
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      renderChart(rows);
+    });
+  });
+}
+
 function clearSaveAlertStatusLater() {
   if (saveAlertStatusTimer) {
     clearTimeout(saveAlertStatusTimer);
@@ -987,6 +996,10 @@ function notificationState() {
 
 function setNotificationState(state) {
   storageSet('tracker_notification_state', JSON.stringify(state));
+}
+
+function clearNotificationState() {
+  setNotificationState({});
 }
 
 function showNotification(title, body, tag) {
@@ -1371,7 +1384,7 @@ function bindControls() {
   viewModeEl.addEventListener('change', () => {
     viewMode = viewModeEl.value;
     storageSet('tracker_view_mode', viewMode);
-    renderChart(currentRows);
+    rerenderChartWithLoading(currentRows);
   });
 
   rangePresetEl.addEventListener('change', () => {
@@ -1383,7 +1396,7 @@ function bindControls() {
       rangePresetEl.value = rangePreset;
       storageSet('tracker_range_preset', rangePreset);
     }
-    renderChart(currentRows);
+    rerenderChartWithLoading(currentRows);
   });
 
   yResetEl.addEventListener('click', () => {
@@ -1397,14 +1410,18 @@ function bindControls() {
     themeMode = themeMode === 'light' ? 'dark' : 'light';
     storageSet('tracker_theme_mode', themeMode);
     applyTheme();
-    renderChart(currentRows);
+    rerenderChartWithLoading(currentRows);
   });
 
   notificationsToggleEl.addEventListener('change', async () => {
     if (!notificationsSupported()) return;
     if (Notification.permission === 'granted') {
+      const wasEnabled = alertsEnabled;
       alertsEnabled = notificationsToggleEl.checked;
       storageSet('tracker_alerts_enabled', alertsEnabled ? 'true' : 'false');
+      if (!wasEnabled && alertsEnabled) {
+        clearNotificationState();
+      }
       updateNotificationsToggle();
       if (alertsEnabled) {
         showNotification(
@@ -1430,8 +1447,12 @@ function bindControls() {
       }
     }
     if (Notification.permission === 'granted') {
+      const wasEnabled = alertsEnabled;
       alertsEnabled = true;
       storageSet('tracker_alerts_enabled', 'true');
+      if (!wasEnabled) {
+        clearNotificationState();
+      }
     } else {
       notificationsToggleEl.checked = false;
     }
@@ -1497,7 +1518,7 @@ async function saveAlertSettings() {
       throw new Error(body.error || ('HTTP ' + res.status));
     }
     applyNotificationSettings(body.notification_settings, true);
-    renderChart(currentRows);
+    rerenderChartWithLoading(currentRows);
     setSaveAlertStatus('Alert settings saved');
     clearSaveAlertStatusLater();
   } catch (err) {
@@ -1552,6 +1573,7 @@ function renderChart(rows) {
     }, { responsive: true });
     ensureRelayoutBinding();
     renderSummaryTable(null, null);
+    setChartLoading(false);
     return;
   }
 
@@ -1654,9 +1676,7 @@ function renderChart(rows) {
 
 async function refreshData() {
   try {
-    if (!hasLoadedInitialData) {
-      setChartLoading(true);
-    }
+    setChartLoading(true);
     const res = await fetch('/data.json', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const payload = await res.json();
@@ -1675,7 +1695,7 @@ async function refreshData() {
 bindControls();
 renderChart([]);
 refreshData();
-window.addEventListener('resize', () => renderChart(currentRows));
+window.addEventListener('resize', () => rerenderChartWithLoading(currentRows));
 setInterval(refreshData, __POLL_MS__);
 """
     return (
