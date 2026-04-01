@@ -36,9 +36,15 @@ CREATE TABLE IF NOT EXISTS usage_runs (
   extra_pct           REAL,
   extra_enabled       INTEGER,
   extra_used_credits  REAL,
-  extra_monthly_limit REAL
+  extra_monthly_limit REAL,
+  sonnet_pct          REAL
 );
 """
+
+# Columns added after initial schema; applied via ALTER TABLE on existing DBs.
+USAGE_RUNS_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("sonnet_pct", "REAL"),
+)
 
 USAGE_RUNS_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_usage_runs_ts_start ON usage_runs(ts_start);
@@ -62,6 +68,7 @@ class UsageDB:
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.executescript(USAGE_RUNS_SCHEMA_SQL)
             conn.executescript(USAGE_RUNS_INDEX_SQL)
+            self._migrate_usage_runs_if_needed(conn)
             self._import_legacy_usage_log_if_needed(conn)
             conn.commit()
 
@@ -83,7 +90,8 @@ class UsageDB:
                   extra_pct,
                   extra_enabled,
                   extra_used_credits,
-                  extra_monthly_limit
+                  extra_monthly_limit,
+                  sonnet_pct
                 FROM usage_runs
                 ORDER BY ts_end DESC, id DESC
                 LIMIT 1
@@ -113,8 +121,9 @@ class UsageDB:
                       extra_pct,
                       extra_enabled,
                       extra_used_credits,
-                      extra_monthly_limit
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      extra_monthly_limit,
+                      sonnet_pct
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         normalized.ts,
@@ -128,6 +137,7 @@ class UsageDB:
                         None if normalized.extra_enabled is None else int(normalized.extra_enabled),
                         normalized.extra_used_credits,
                         normalized.extra_monthly_limit,
+                        normalized.sonnet_pct,
                     ),
                 )
             conn.commit()
@@ -153,7 +163,8 @@ class UsageDB:
                       extra_pct,
                       extra_enabled,
                       extra_used_credits,
-                      extra_monthly_limit
+                      extra_monthly_limit,
+                      sonnet_pct
                     FROM usage_runs
                     ORDER BY ts_start ASC, id ASC
                     """
@@ -172,7 +183,8 @@ class UsageDB:
                       extra_pct,
                       extra_enabled,
                       extra_used_credits,
-                      extra_monthly_limit
+                      extra_monthly_limit,
+                      sonnet_pct
                     FROM usage_runs
                     WHERE ts_end >= ? AND ts_start < ?
                     ORDER BY ts_start ASC, id ASC
@@ -227,19 +239,34 @@ class UsageDB:
         current_cycle_end = _parse_iso(latest[1])
         if current_cycle_end is None:
             return (None, None)
-        previous = conn.execute(
+        # Use the earliest ts_start that shares the same weekly_resets as the
+        # latest row. This correctly handles mid-cycle plan switches, where the
+        # new cycle begins before the previous cycle's weekly_resets date — using
+        # the previous weekly_resets as cycle_start would silently drop the early
+        # data from the new cycle.
+        first_in_cycle = conn.execute(
             """
-            SELECT weekly_resets
+            SELECT ts_start
             FROM usage_runs
-            WHERE weekly_resets < ?
-            ORDER BY weekly_resets DESC, id DESC
+            WHERE weekly_resets = ?
+            ORDER BY ts_start ASC, id ASC
             LIMIT 1
             """,
             (current_cycle_end.isoformat(),),
         ).fetchone()
-        previous_cycle_end = _parse_iso(previous[0]) if previous else None
-        cycle_start = previous_cycle_end or (current_cycle_end - timedelta(days=7))
+        if first_in_cycle:
+            cycle_start = _parse_iso(first_in_cycle[0]) or (current_cycle_end - timedelta(days=7))
+        else:
+            cycle_start = current_cycle_end - timedelta(days=7)
         return (cycle_start.isoformat(), current_cycle_end.isoformat())
+
+    def _migrate_usage_runs_if_needed(self, conn: sqlite3.Connection) -> None:
+        existing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(usage_runs)").fetchall()
+        }
+        for column_name, column_type in USAGE_RUNS_NEW_COLUMNS:
+            if column_name not in existing_columns:
+                conn.execute(f"ALTER TABLE usage_runs ADD COLUMN {column_name} {column_type}")
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
@@ -321,8 +348,9 @@ class UsageDB:
               extra_pct,
               extra_enabled,
               extra_used_credits,
-              extra_monthly_limit
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              extra_monthly_limit,
+              sonnet_pct
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             runs,
         )
@@ -345,6 +373,7 @@ class UsageDB:
             and _boolish(sample.extra_enabled) == _boolish(run["extra_enabled"])
             and sample.extra_used_credits == run["extra_used_credits"]
             and sample.extra_monthly_limit == run["extra_monthly_limit"]
+            and sample.sonnet_pct == run["sonnet_pct"]
         )
 
     def _sample_from_legacy_row(self, row: sqlite3.Row) -> UsageSample:
@@ -374,6 +403,7 @@ class UsageDB:
             run["extra_enabled"],
             run["extra_used_credits"],
             run["extra_monthly_limit"],
+            run.get("sonnet_pct"),
         )
 
     def _migrate_legacy_usage_log(self, conn: sqlite3.Connection) -> None:
@@ -443,6 +473,7 @@ class UsageDB:
             "extra_enabled": run["extra_enabled"],
             "extra_used_credits": run["extra_used_credits"],
             "extra_monthly_limit": run["extra_monthly_limit"],
+            "sonnet_pct": run.get("sonnet_pct"),
         }
 
 

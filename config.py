@@ -28,7 +28,9 @@ RUNTIME_ENV_ORDER = (
     "NOTIFY_SESSION_THRESHOLD_PCT",
     "NOTIFY_WEEKLY_THRESHOLD_PCT",
     "NOTIFY_EXTRA_THRESHOLD_PCT",
+    "NOTIFY_SONNET_THRESHOLD_PCT",
     "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED",
+    "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED",
     "USER_AGENT",
 )
 
@@ -43,7 +45,9 @@ RUNTIME_ENV_DEFAULTS = {
     "NOTIFY_SESSION_THRESHOLD_PCT": "",
     "NOTIFY_WEEKLY_THRESHOLD_PCT": "",
     "NOTIFY_EXTRA_THRESHOLD_PCT": "",
+    "NOTIFY_SONNET_THRESHOLD_PCT": "",
     "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": "false",
+    "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED": "false",
     "USER_AGENT": "",
 }
 
@@ -65,7 +69,9 @@ class AppConfig:
     notify_session_threshold_pct: Optional[float]
     notify_weekly_threshold_pct: Optional[float]
     notify_extra_threshold_pct: Optional[float]
+    notify_sonnet_threshold_pct: Optional[float]
     notify_expected_weekly_overrun_enabled: bool
+    notify_expected_sonnet_overrun_enabled: bool
 
 
 DEFAULT_USER_AGENT = (
@@ -164,8 +170,12 @@ def load_config() -> AppConfig:
         notify_session_threshold_pct=_as_pct_threshold(get("NOTIFY_SESSION_THRESHOLD_PCT")),
         notify_weekly_threshold_pct=_as_pct_threshold(get("NOTIFY_WEEKLY_THRESHOLD_PCT")),
         notify_extra_threshold_pct=_as_pct_threshold(get("NOTIFY_EXTRA_THRESHOLD_PCT")),
+        notify_sonnet_threshold_pct=_as_pct_threshold(get("NOTIFY_SONNET_THRESHOLD_PCT")),
         notify_expected_weekly_overrun_enabled=_as_bool(
             get("NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED"), False
+        ),
+        notify_expected_sonnet_overrun_enabled=_as_bool(
+            get("NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED"), False
         ),
     )
 
