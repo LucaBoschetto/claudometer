@@ -94,6 +94,7 @@ def parse_payload(
 ) -> UsageSample:
     five_hour = payload.get("five_hour") or {}
     seven_day = payload.get("seven_day") or {}
+    seven_day_sonnet = payload.get("seven_day_sonnet") or {}
     extra_usage = payload.get("extra_usage") or {}
     overage = overage_payload or {}
 
@@ -126,6 +127,7 @@ def parse_payload(
         extra_enabled=extra_enabled,
         extra_used_credits=extra_used_credits,
         extra_monthly_limit=extra_monthly_limit,
+        sonnet_pct=_normalize_usage_api_pct(seven_day_sonnet.get("utilization")) if seven_day_sonnet else None,
     )
 
 
