@@ -1,5 +1,7 @@
 # Claude Usage Tracker (Local)
 
+![Dashboard screenshot](docs/dashboard.png)
+
 Lightweight local tracker for `https://claude.ai/settings/usage` that:
 
 - Polls usage every `POLL_INTERVAL_SECONDS` (default `60`)
