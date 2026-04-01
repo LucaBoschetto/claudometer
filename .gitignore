@@ -28,5 +28,8 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Claude Code local settings
+.claude/settings.json
+
 # Local capture artifacts
 curl.txt
