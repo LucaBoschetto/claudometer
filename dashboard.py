@@ -88,6 +88,7 @@ def main() -> None:
         notify_sonnet_threshold_pct=config.notify_sonnet_threshold_pct,
         notify_expected_weekly_overrun_enabled=config.notify_expected_weekly_overrun_enabled,
         notify_expected_sonnet_overrun_enabled=config.notify_expected_sonnet_overrun_enabled,
+        notify_expected_session_overrun_enabled=config.notify_expected_session_overrun_enabled,
     )
 
     try:

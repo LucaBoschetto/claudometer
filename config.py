@@ -31,6 +31,7 @@ RUNTIME_ENV_ORDER = (
     "NOTIFY_SONNET_THRESHOLD_PCT",
     "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED",
     "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED",
+    "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED",
     "USER_AGENT",
 )
 
@@ -48,6 +49,7 @@ RUNTIME_ENV_DEFAULTS = {
     "NOTIFY_SONNET_THRESHOLD_PCT": "",
     "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": "false",
     "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED": "false",
+    "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED": "false",
     "USER_AGENT": "",
 }
 
@@ -72,6 +74,7 @@ class AppConfig:
     notify_sonnet_threshold_pct: Optional[float]
     notify_expected_weekly_overrun_enabled: bool
     notify_expected_sonnet_overrun_enabled: bool
+    notify_expected_session_overrun_enabled: bool
 
 
 DEFAULT_USER_AGENT = (
@@ -176,6 +179,9 @@ def load_config() -> AppConfig:
         ),
         notify_expected_sonnet_overrun_enabled=_as_bool(
             get("NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED"), False
+        ),
+        notify_expected_session_overrun_enabled=_as_bool(
+            get("NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED"), False
         ),
     )
 

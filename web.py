@@ -31,6 +31,7 @@ def start_dashboard_server(
     notify_sonnet_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
     notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_session_overrun_enabled: bool,
 ) -> ThreadingHTTPServer:
     handler_cls = _build_handler(
         db,
@@ -44,6 +45,7 @@ def start_dashboard_server(
         notify_sonnet_threshold_pct,
         notify_expected_weekly_overrun_enabled,
         notify_expected_sonnet_overrun_enabled,
+        notify_expected_session_overrun_enabled,
     )
     server = ReusableThreadingHTTPServer((host, port), handler_cls)
 
@@ -66,6 +68,7 @@ def _build_handler(
     notify_sonnet_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
     notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_session_overrun_enabled: bool,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -89,6 +92,7 @@ def _build_handler(
                         notify_sonnet_threshold_pct,
                         notify_expected_weekly_overrun_enabled,
                         notify_expected_sonnet_overrun_enabled,
+                        notify_expected_session_overrun_enabled,
                     )
                 )
                 return
@@ -110,6 +114,7 @@ def _build_handler(
                     "sonnet_threshold_pct": current_config.notify_sonnet_threshold_pct,
                     "expected_weekly_overrun_enabled": current_config.notify_expected_weekly_overrun_enabled,
                     "expected_sonnet_overrun_enabled": current_config.notify_expected_sonnet_overrun_enabled,
+                    "expected_session_overrun_enabled": current_config.notify_expected_session_overrun_enabled,
                 }
                 self._respond_json(payload)
                 return
@@ -136,6 +141,9 @@ def _build_handler(
                         "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED": normalized[
                             "expected_sonnet_overrun_enabled"
                         ],
+                        "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED": normalized[
+                            "expected_session_overrun_enabled"
+                        ],
                     }
                 )
             except ValueError as exc:
@@ -158,6 +166,9 @@ def _build_handler(
                         ] == "true",
                         "expected_sonnet_overrun_enabled": normalized[
                             "expected_sonnet_overrun_enabled"
+                        ] == "true",
+                        "expected_session_overrun_enabled": normalized[
+                            "expected_session_overrun_enabled"
                         ] == "true",
                     },
                 }
@@ -251,6 +262,9 @@ def _normalize_notification_settings(payload: dict[str, Any]) -> dict[str, str]:
         else "false",
         "expected_sonnet_overrun_enabled": "true"
         if bool(payload.get("expected_sonnet_overrun_enabled"))
+        else "false",
+        "expected_session_overrun_enabled": "true"
+        if bool(payload.get("expected_session_overrun_enabled"))
         else "false",
     }
 
@@ -747,6 +761,7 @@ def _app_js(
     notify_sonnet_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
     notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_session_overrun_enabled: bool,
 ) -> str:
     poll_ms = poll_interval_seconds * 1000
     js = """
@@ -773,6 +788,7 @@ let notifyExtraThresholdPct = __NOTIFY_EXTRA_THRESHOLD_PCT__;
 let notifySonnetThresholdPct = __NOTIFY_SONNET_THRESHOLD_PCT__;
 let notifyExpectedWeeklyOverrunEnabled = __NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__;
 let notifyExpectedSonnetOverrunEnabled = __NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED__;
+let notifyExpectedSessionOverrunEnabled = __NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__;
 
 let hasInitializedXRange = false;
 let hasBoundRelayout = false;
@@ -822,7 +838,8 @@ let alertSettingsDraft = {
   extra_threshold_pct: notifyExtraThresholdPct,
   sonnet_threshold_pct: notifySonnetThresholdPct,
   expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
-  expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled
+  expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled,
+  expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
 };
 
 function pad2(n) {
@@ -932,7 +949,8 @@ function syncAlertSettingsDraftFromRuntime() {
     extra_threshold_pct: notifyExtraThresholdPct,
     sonnet_threshold_pct: notifySonnetThresholdPct,
     expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
-    expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled
+    expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled,
+    expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
   };
 }
 
@@ -948,7 +966,8 @@ function normalizedAlertSettingsSnapshot(settings) {
     extra_threshold_pct: normalizeThreshold(settings.extra_threshold_pct),
     sonnet_threshold_pct: normalizeThreshold(settings.sonnet_threshold_pct),
     expected_weekly_overrun_enabled: !!settings.expected_weekly_overrun_enabled,
-    expected_sonnet_overrun_enabled: !!settings.expected_sonnet_overrun_enabled
+    expected_sonnet_overrun_enabled: !!settings.expected_sonnet_overrun_enabled,
+    expected_session_overrun_enabled: !!settings.expected_session_overrun_enabled
   });
 }
 
@@ -959,7 +978,8 @@ function refreshSaveAlertButton() {
     extra_threshold_pct: notifyExtraThresholdPct,
     sonnet_threshold_pct: notifySonnetThresholdPct,
     expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
-    expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled
+    expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled,
+    expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
   };
   alertSettingsDirty =
     normalizedAlertSettingsSnapshot(alertSettingsDraft) !==
@@ -977,7 +997,7 @@ function fmtPct(v) {
   return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + '%';
 }
 
-function renderSummaryTable(latest, expectedWeeklyNowPct, expectedSonnetNowPct) {
+function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
   const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
 
@@ -1006,8 +1026,8 @@ function renderSummaryTable(latest, expectedWeeklyNowPct, expectedSonnetNowPct) 
       usage: fmtPct(latest ? latest.session_pct : null),
       reset: fmtReset(latest ? latest.session_resets : null),
       alert: makeThresholdAlert('session_threshold_pct', alertSettingsDraft.session_threshold_pct),
-      expected: null,
-      overrunAlert: null
+      expected: fmtPct(expectedSessionNowPct),
+      overrunAlert: makeOverrunAlert('expected_session_overrun_enabled', alertSettingsDraft.expected_session_overrun_enabled)
     },
     {
       metric: 'Weekly',
@@ -1086,14 +1106,16 @@ function evaluateThresholdNotificationsNow() {
   const latest = currentRows[currentRows.length - 1];
   const hasSonnet = currentRows.some((r) => r.sonnet_pct !== null && r.sonnet_pct !== undefined);
   const sonnetExpected = hasSonnet ? computeExpectedSonnetTrace(currentRows) : null;
+  const sessionExpected = computeExpectedSessionTrace(currentRows);
   maybeNotifyThresholds(
     latest,
+    sessionExpected ? sessionExpected.expectedNowPct : null,
     latestExpectedNowPct(currentRows),
     sonnetExpected ? sonnetExpected.expectedNowPct : null
   );
 }
 
-function maybeNotifyThresholds(latest, expectedWeeklyNowPct, expectedSonnetNowPct) {
+function maybeNotifyThresholds(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct) {
   if (!latest || !notificationsSupported() || Notification.permission !== 'granted' || !alertsEnabled) return;
 
   const state = notificationState();
@@ -1107,6 +1129,7 @@ function maybeNotifyThresholds(latest, expectedWeeklyNowPct, expectedSonnetNowPc
     'Claudometer: session usage alert',
     `Current session usage reached ${fmtPct(latest.session_pct)}.`
   );
+  maybeNotifyExpectedSessionOverrun(state, latest, expectedSessionNowPct);
 
   maybeNotifyThresholdCrossing(
     state,
@@ -1200,6 +1223,40 @@ function maybeNotifyExpectedOverrun(state, latest, expectedNowPct) {
   }
 
   state.expectedOverrun = entry;
+}
+
+function maybeNotifyExpectedSessionOverrun(state, latest, expectedNowPct) {
+  if (
+    !notifyExpectedSessionOverrunEnabled ||
+    latest.session_pct === null ||
+    latest.session_pct === undefined ||
+    expectedNowPct === null ||
+    expectedNowPct === undefined
+  ) {
+    return;
+  }
+
+  const entryKey = latest.session_resets || 'unknown';
+  const entry = state.expectedSessionOverrun || {};
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (latest.session_pct > expectedNowPct) {
+    if (!entry.alerted) {
+      showNotification(
+        'Claudometer: session usage above expected',
+        `Session usage is ${fmtPct(latest.session_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
+        `expected-session-overrun:${entryKey}`
+      );
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state.expectedSessionOverrun = entry;
 }
 
 function maybeNotifyExpectedSonnetOverrun(state, latest, expectedNowPct) {
@@ -1301,6 +1358,33 @@ function expectedPctAt(ts, cycleStart, cycleEnd, startMin, endMin, totalActive) 
   if (totalActive <= 0) return null;
   const elapsed = activeMsBetween(cycleStart, ts, startMin, endMin);
   return Math.max(0, Math.min(100, (elapsed / totalActive) * 100));
+}
+
+// Expected session line: simple linear 0% → 100% over the current 5-hour window.
+// Only drawn for the latest (active) session — identified by session_resets matching
+// the most recent row. Past sessions are ignored entirely.
+function computeExpectedSessionTrace(rows) {
+  if (!expectedLineEnabled || rows.length < 1) return null;
+  const latest = rows[rows.length - 1];
+  if (!latest.session_resets) return null;
+  const cycleEnd = new Date(latest.session_resets);
+  if (Number.isNaN(cycleEnd.getTime())) return null;
+  const cycleStart = new Date(cycleEnd.getTime() - 5 * 60 * 60 * 1000);
+  const now = new Date();
+  const elapsed = Math.max(0, now.getTime() - cycleStart.getTime());
+  const total = cycleEnd.getTime() - cycleStart.getTime();
+  const nowPct = Math.max(0, Math.min(100, (elapsed / total) * 100));
+  return {
+    trace: {
+      x: [toLocalPlotTs(cycleStart.toISOString()), toLocalPlotTs(cycleEnd.toISOString())],
+      y: [0, 100],
+      mode: 'lines',
+      name: 'Expected session usage',
+      line: { color: 'rgba(31,141,235,0.45)', width: 1, dash: '3px,3px' },
+      hovertemplate: 'Expected session: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected session usage</extra>'
+    },
+    expectedNowPct: nowPct
+  };
 }
 
 function computeExpectedWeeklyTrace(rows) {
@@ -1699,7 +1783,8 @@ async function saveAlertSettings() {
       extra_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.extra_threshold_pct),
       sonnet_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.sonnet_threshold_pct),
       expected_weekly_overrun_enabled: !!alertSettingsDraft.expected_weekly_overrun_enabled,
-      expected_sonnet_overrun_enabled: !!alertSettingsDraft.expected_sonnet_overrun_enabled
+      expected_sonnet_overrun_enabled: !!alertSettingsDraft.expected_sonnet_overrun_enabled,
+      expected_session_overrun_enabled: !!alertSettingsDraft.expected_session_overrun_enabled
     };
     const res = await fetch('/notification-settings', {
       method: 'POST',
@@ -1734,6 +1819,7 @@ function applyNotificationSettings(settings, fromSave = false) {
   notifySonnetThresholdPct = settings.sonnet_threshold_pct ?? null;
   notifyExpectedWeeklyOverrunEnabled = !!settings.expected_weekly_overrun_enabled;
   notifyExpectedSonnetOverrunEnabled = !!settings.expected_sonnet_overrun_enabled;
+  notifyExpectedSessionOverrunEnabled = !!settings.expected_session_overrun_enabled;
   if (!alertSettingsDirty || fromSave) {
     syncAlertSettingsDraftFromRuntime();
   }
@@ -1767,7 +1853,7 @@ function renderChart(rows) {
       margin: compact ? { t: 20, r: 18, b: 48, l: 42 } : { t: 24, r: 30, b: 72, l: 60 }
     }, { responsive: true });
     ensureRelayoutBinding();
-    renderSummaryTable(null, null, null);
+    renderSummaryTable(null, null, null, null);
     setChartLoading(false);
     return;
   }
@@ -1840,6 +1926,12 @@ function renderChart(rows) {
   // compute it for the table/notifications — no separate chart trace needed.
   const expectedSonnetData = hasSonnet ? computeExpectedSonnetTrace(rows) : null;
 
+  const expectedSessionData = computeExpectedSessionTrace(rows);
+  if (expectedSessionData) {
+    expectedSessionData.trace.legendrank = 5;
+    traces.push(expectedSessionData.trace);
+  }
+
   const latest = rows[rows.length - 1];
   statusEl.textContent =
     'Samples: ' + currentTotalSamples +
@@ -1847,11 +1939,13 @@ function renderChart(rows) {
     ' | Last sample: ' + formatLocalDateTimeFull(latest.ts);
   renderSummaryTable(
     latest,
+    expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
     expectedSonnetData ? expectedSonnetData.expectedNowPct : null
   );
   maybeNotifyThresholds(
     latest,
+    expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
     expectedSonnetData ? expectedSonnetData.expectedNowPct : null
   );
@@ -1949,5 +2043,9 @@ setInterval(refreshData, __POLL_MS__);
         .replace(
             "__NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED__",
             "true" if notify_expected_sonnet_overrun_enabled else "false",
+        )
+        .replace(
+            "__NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__",
+            "true" if notify_expected_session_overrun_enabled else "false",
         )
     )
