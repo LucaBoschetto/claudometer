@@ -355,7 +355,7 @@ def _index_html(poll_interval_seconds: int) -> str:
             <th>Metric</th>
             <th>Usage</th>
             <th>Expected</th>
-            <th>Resets At (Local)</th>
+            <th>Resets at (Local)</th>
             <th>Alert</th>
             <th>Overrun alert</th>
           </tr>
@@ -653,8 +653,8 @@ h2 {
   color: var(--muted);
   font-weight: 500;
 }
-#summary-table th:nth-child(3),
-#summary-table td[data-cell="expected"] {
+#summary-table th:nth-child(5),
+#summary-table td:nth-child(5) {
   border-left: 1px solid var(--line);
 }
 #summary-table tbody tr:last-child td { border-bottom: none; }
@@ -730,7 +730,7 @@ h2 {
   #summary-table td.cell-hidden {
     display: none;
   }
-  #summary-table td[data-cell="expected"] {
+  #summary-table td:nth-child(5) {
     border-left: none;
   }
   #summary-table td::before {
@@ -1075,7 +1075,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
         <td data-cell="metric">${row.metric}</td>
         <td data-label="Usage">${row.usage}</td>
         <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
-        <td data-label="Resets At (Local)">${row.reset || '-'}</td>
+        <td data-label="Resets at (Local)">${row.reset || '-'}</td>
         <td data-label="Alert">${row.alert}</td>
         <td data-label="Overrun alert"${hasExpected ? '' : ' class="cell-hidden"'}>${hasExpected ? row.overrunAlert : ''}</td>
       </tr>`;
