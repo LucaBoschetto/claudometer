@@ -1388,7 +1388,7 @@ function computeExpectedSessionTrace(rows) {
       y: [0, 100],
       mode: 'lines',
       name: 'Expected session usage',
-      line: { color: 'rgba(31,141,235,0.45)', width: 1.5, dash: '3px,3px' },
+      line: { color: 'rgba(31,141,235,0.45)', width: 2.0, dash: '3px,3px' },
       hovertemplate: 'Expected session: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected session usage</extra>'
     },
     expectedNowPct: nowPct
@@ -1441,7 +1441,7 @@ function computeExpectedWeeklyTrace(rows) {
       y,
       mode: 'lines',
       name: 'Expected weekly usage',
-      line: { color: 'rgba(170,170,170,0.75)', width: 1.5, dash: '3px,3px' },
+      line: { color: 'rgba(170,170,170,0.75)', width: 2.0, dash: '3px,3px' },
       hovertemplate: 'Expected: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected weekly usage</extra>'
     },
     expectedNowPct: nowPct
@@ -1499,7 +1499,7 @@ function computeExpectedSonnetTrace(rows) {
       y,
       mode: 'lines',
       name: 'Expected Sonnet usage',
-      line: { color: 'rgba(192,132,252,0.65)', width: 1.5, dash: '3px,3px' },
+      line: { color: 'rgba(192,132,252,0.65)', width: 2.0, dash: '3px,3px' },
       hovertemplate: 'Expected Sonnet: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected Sonnet usage</extra>'
     },
     expectedNowPct: nowPct
