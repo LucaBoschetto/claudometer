@@ -354,9 +354,9 @@ def _index_html(poll_interval_seconds: int) -> str:
           <tr>
             <th>Metric</th>
             <th>Usage</th>
+            <th>Expected</th>
             <th>Resets At (Local)</th>
             <th>Alert</th>
-            <th>Expected</th>
             <th>Overrun alert</th>
           </tr>
         </thead>
@@ -653,7 +653,7 @@ h2 {
   color: var(--muted);
   font-weight: 500;
 }
-#summary-table th:nth-child(5),
+#summary-table th:nth-child(3),
 #summary-table td[data-cell="expected"] {
   border-left: 1px solid var(--line);
 }
@@ -1027,6 +1027,8 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       reset: fmtReset(latest ? latest.session_resets : null),
       alert: makeThresholdAlert('session_threshold_pct', alertSettingsDraft.session_threshold_pct),
       expected: fmtPct(expectedSessionNowPct),
+      rawExpected: expectedSessionNowPct ?? null,
+      rawUsage: latest ? (latest.session_pct ?? null) : null,
       overrunAlert: makeOverrunAlert('expected_session_overrun_enabled', alertSettingsDraft.expected_session_overrun_enabled)
     },
     {
@@ -1035,6 +1037,8 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       reset: fmtReset(latest ? latest.weekly_resets : null),
       alert: makeThresholdAlert('weekly_threshold_pct', alertSettingsDraft.weekly_threshold_pct),
       expected: fmtPct(expectedWeeklyNowPct),
+      rawExpected: expectedWeeklyNowPct ?? null,
+      rawUsage: latest ? (latest.weekly_pct ?? null) : null,
       overrunAlert: makeOverrunAlert('expected_weekly_overrun_enabled', alertSettingsDraft.expected_weekly_overrun_enabled)
     },
   ];
@@ -1047,6 +1051,8 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       reset: fmtReset(latest.weekly_resets),
       alert: makeThresholdAlert('sonnet_threshold_pct', alertSettingsDraft.sonnet_threshold_pct),
       expected: fmtPct(expectedSonnetNowPct),
+      rawExpected: expectedSonnetNowPct ?? null,
+      rawUsage: latest.sonnet_pct ?? null,
       overrunAlert: makeOverrunAlert('expected_sonnet_overrun_enabled', alertSettingsDraft.expected_sonnet_overrun_enabled)
     });
   }
@@ -1063,12 +1069,14 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
   summaryBodyEl.innerHTML = rows
     .map((row) => {
       const hasExpected = row.expected !== null;
+      const expectedOverrun = hasExpected && row.rawExpected !== null && row.rawUsage !== null && row.rawUsage > row.rawExpected;
+      const expectedStyle = expectedOverrun ? ' style="color: var(--accent-2)"' : '';
       return `<tr>
         <td data-cell="metric">${row.metric}</td>
         <td data-label="Usage">${row.usage}</td>
+        <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
         <td data-label="Resets At (Local)">${row.reset || '-'}</td>
         <td data-label="Alert">${row.alert}</td>
-        <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}>${hasExpected ? row.expected : ''}</td>
         <td data-label="Overrun alert"${hasExpected ? '' : ' class="cell-hidden"'}>${hasExpected ? row.overrunAlert : ''}</td>
       </tr>`;
     })
