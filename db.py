@@ -142,6 +142,35 @@ class UsageDB:
                 )
             conn.commit()
 
+    def fetch_last_sample(self) -> dict[str, Any] | None:
+        """Return the most recent usage run as a dict, or None if empty."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT
+                  ts_end,
+                  session_pct,
+                  session_resets,
+                  weekly_pct,
+                  weekly_resets,
+                  extra_pct,
+                  extra_enabled,
+                  extra_used_credits,
+                  extra_monthly_limit,
+                  sonnet_pct
+                FROM usage_runs
+                ORDER BY ts_end DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            if result.get("extra_enabled") is not None:
+                result["extra_enabled"] = bool(result["extra_enabled"])
+            return result
+
     def fetch_chart_data(self, range_preset: str = "all") -> dict[str, Any]:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row

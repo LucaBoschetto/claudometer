@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -10,6 +11,86 @@ from typing import Any
 
 from config import load_config, write_runtime_env_values
 from db import UsageDB
+
+
+def _hhmm_to_minutes(hhmm: str) -> int | None:
+    parts = hhmm.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hh, mm = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return hh * 60 + mm
+
+
+def _active_ms_between(
+    start: datetime, end: datetime, start_min: int, end_min: int
+) -> float:
+    start_ts = start.timestamp() * 1000
+    end_ts = end.timestamp() * 1000
+    if end_ts <= start_ts:
+        return 0
+    total = 0.0
+    cursor = start.astimezone()
+    cursor = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
+    while cursor.timestamp() * 1000 < end_ts:
+        day_start_ms = cursor.timestamp() * 1000
+        active_start = day_start_ms + start_min * 60 * 1000
+        active_end = day_start_ms + end_min * 60 * 1000
+        overlap_start = max(start_ts, active_start)
+        overlap_end = min(end_ts, active_end)
+        total += max(0, overlap_end - overlap_start)
+        cursor += timedelta(days=1)
+    return total
+
+
+def _expected_session_pct(session_resets_iso: str | None) -> float | None:
+    if not session_resets_iso:
+        return None
+    try:
+        cycle_end = datetime.fromisoformat(session_resets_iso)
+    except ValueError:
+        return None
+    if cycle_end.tzinfo is None:
+        cycle_end = cycle_end.replace(tzinfo=timezone.utc)
+    cycle_start = cycle_end - timedelta(hours=5)
+    now = datetime.now(timezone.utc)
+    elapsed = max(0, (now - cycle_start).total_seconds())
+    total = (cycle_end - cycle_start).total_seconds()
+    if total <= 0:
+        return None
+    return max(0, min(100, (elapsed / total) * 100))
+
+
+def _expected_weekly_pct(
+    weekly_resets_iso: str | None, start_hhmm: str, end_hhmm: str
+) -> float | None:
+    if not weekly_resets_iso:
+        return None
+    start_min = _hhmm_to_minutes(start_hhmm)
+    end_min = _hhmm_to_minutes(end_hhmm)
+    if start_min is None or end_min is None or end_min <= start_min:
+        return None
+    try:
+        cycle_end = datetime.fromisoformat(weekly_resets_iso)
+    except ValueError:
+        return None
+    if cycle_end.tzinfo is None:
+        cycle_end = cycle_end.replace(tzinfo=timezone.utc)
+    cycle_start = cycle_end - timedelta(days=7)
+    total_active = _active_ms_between(cycle_start, cycle_end, start_min, end_min)
+    if total_active <= 0:
+        return None
+    now = datetime.now(timezone.utc)
+    if now <= cycle_start:
+        return 0.0
+    if now >= cycle_end:
+        return 100.0
+    elapsed_active = _active_ms_between(cycle_start, now, start_min, end_min)
+    return max(0, min(100, (elapsed_active / total_active) * 100))
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -115,6 +196,56 @@ def _build_handler(
                     "expected_weekly_overrun_enabled": current_config.notify_expected_weekly_overrun_enabled,
                     "expected_sonnet_overrun_enabled": current_config.notify_expected_sonnet_overrun_enabled,
                     "expected_session_overrun_enabled": current_config.notify_expected_session_overrun_enabled,
+                }
+                self._respond_json(payload)
+                return
+
+            if path == "/last":
+                last = db.fetch_last_sample()
+                if last is None:
+                    self._respond_json({"error": "no data"})
+                    return
+                session_resets = last.get("session_resets")
+                weekly_resets = last.get("weekly_resets")
+                expected_session = (
+                    _expected_session_pct(session_resets)
+                    if expected_weekly_line_enabled
+                    else None
+                )
+                expected_weekly = (
+                    _expected_weekly_pct(
+                        weekly_resets,
+                        expected_active_start_hhmm,
+                        expected_active_end_hhmm,
+                    )
+                    if expected_weekly_line_enabled
+                    else None
+                )
+                expected_sonnet = (
+                    _expected_weekly_pct(
+                        weekly_resets,
+                        expected_active_start_hhmm,
+                        expected_active_end_hhmm,
+                    )
+                    if expected_weekly_line_enabled and last.get("sonnet_pct") is not None
+                    else None
+                )
+                payload = {
+                    "ts": last["ts_end"],
+                    "current": {
+                        "session_pct": last.get("session_pct"),
+                        "weekly_pct": last.get("weekly_pct"),
+                        "sonnet_pct": last.get("sonnet_pct"),
+                    },
+                    "expected": {
+                        "session_pct": round(expected_session, 2) if expected_session is not None else None,
+                        "weekly_pct": round(expected_weekly, 2) if expected_weekly is not None else None,
+                        "sonnet_pct": round(expected_sonnet, 2) if expected_sonnet is not None else None,
+                    },
+                    "resets": {
+                        "session": session_resets,
+                        "weekly": weekly_resets,
+                    },
                 }
                 self._respond_json(payload)
                 return
