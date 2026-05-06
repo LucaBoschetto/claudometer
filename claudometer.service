@@ -1,0 +1,23 @@
+[Unit]
+Description=Claudometer – Claude usage tracker dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/luca/Projects/claudometer
+ExecStart=/home/luca/Projects/claudometer/.venv/bin/python dashboard.py
+Restart=on-failure
+RestartSec=5
+
+# Logging — stdout/stderr go to journalctl
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectHome=read-only
+ReadWritePaths=%h/.claude-usage-tracker
+
+[Install]
+WantedBy=default.target
