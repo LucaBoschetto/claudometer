@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from models import UsageSample
 
@@ -297,8 +298,18 @@ class UsageDB:
             if column_name not in existing_columns:
                 conn.execute(f"ALTER TABLE usage_runs ADD COLUMN {column_name} {column_type}")
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3.Connection's own context manager only commits/rolls back —
+        # it does NOT close the connection, leaking one FD (plus a WAL FD)
+        # per call until cyclic GC eventually fires. In a threaded HTTP
+        # server this exhausts the process's file descriptor limit.
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _import_legacy_usage_log_if_needed(self, conn: sqlite3.Connection) -> None:
         has_legacy = conn.execute(
