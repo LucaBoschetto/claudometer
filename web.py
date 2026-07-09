@@ -497,6 +497,7 @@ def _index_html(poll_interval_seconds: int) -> str:
           <tr>
             <th>Metric</th>
             <th>Usage</th>
+            <th>Burn rate</th>
             <th>Expected</th>
             <th>Resets at (Local)</th>
             <th>Alert</th>
@@ -1149,7 +1150,7 @@ function fmtPct(v) {
   return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + '%';
 }
 
-function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct) {
+function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct, sessionBurnNow, weeklyBurnNow) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
   const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
 
@@ -1176,6 +1177,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     {
       metric: 'Current session',
       usage: fmtPct(latest ? latest.session_pct : null),
+      burn: sessionBurnNow ?? null,
       reset: fmtReset(latest ? latest.session_resets : null),
       alert: makeThresholdAlert('session_threshold_pct', alertSettingsDraft.session_threshold_pct),
       expected: fmtPct(expectedSessionNowPct),
@@ -1186,6 +1188,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     {
       metric: 'Weekly',
       usage: fmtPct(latest ? latest.weekly_pct : null),
+      burn: weeklyBurnNow ?? null,
       reset: fmtReset(latest ? latest.weekly_resets : null),
       alert: makeThresholdAlert('weekly_threshold_pct', alertSettingsDraft.weekly_threshold_pct),
       expected: fmtPct(expectedWeeklyNowPct),
@@ -1226,6 +1229,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       return `<tr>
         <td data-cell="metric">${row.metric}</td>
         <td data-label="Usage">${row.usage}</td>
+        <td data-label="Burn rate">${row.burn === undefined || row.burn === null ? '-' : fmtBurn(row.burn)}</td>
         <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
         <td data-label="Resets at (Local)">${row.reset || '-'}</td>
         <td data-label="Alert">${row.alert}</td>
@@ -1699,6 +1703,63 @@ function maskedSeries(rows, key, predicate) {
   return values.map((value, index) => predicate(rows[index]) ? value : null);
 }
 
+// Burn rate: rate of utilization climb in percentage-points per hour.
+// Each output point is the time-weighted average of adjacent-sample slopes
+// within the trailing `windowMinutes`. A step where usage drops (a window
+// reset, or a downward correction) is dropped, so a reset reads as a gap
+// rather than a large negative spike. Result is aligned 1:1 with `rows`.
+function computeBurnRate(rows, key, windowMinutes = 30) {
+  const n = rows.length;
+  const out = new Array(n).fill(null);
+  if (n < 2) return out;
+
+  const times = rows.map((r) => new Date(r.ts).getTime());
+
+  // slope[i] = %/hr for the step ending at sample i (from i-1 to i).
+  // reset[i] marks a step where usage dropped (a window reset or correction).
+  const slope = new Array(n).fill(null);
+  const reset = new Array(n).fill(false);
+  for (let i = 1; i < n; i += 1) {
+    const v0 = rows[i - 1][key];
+    const v1 = rows[i][key];
+    if (v0 == null || v1 == null) continue;
+    if (Number.isNaN(times[i]) || Number.isNaN(times[i - 1])) continue;
+    const dtHours = (times[i] - times[i - 1]) / 3600000;
+    if (dtHours <= 0) continue;
+    if (v1 < v0) { reset[i] = true; continue; } // no valid burn rate across a reset
+    slope[i] = (v1 - v0) / dtHours;
+  }
+
+  const windowMs = windowMinutes * 60 * 1000;
+  for (let i = 1; i < n; i += 1) {
+    if (Number.isNaN(times[i])) continue;
+    let weighted = 0;
+    let weight = 0;
+    for (let j = i; j >= 1; j -= 1) {
+      if (times[i] - times[j] > windowMs) break;
+      if (reset[j]) break; // don't average across a reset boundary
+      if (slope[j] == null) continue;
+      const stepMs = times[j] - times[j - 1];
+      if (!(stepMs > 0)) continue;
+      weighted += slope[j] * stepMs;
+      weight += stepMs;
+    }
+    if (weight > 0) out[i] = weighted / weight;
+  }
+  return out;
+}
+
+function lastNonNull(series) {
+  for (let i = series.length - 1; i >= 0; i -= 1) {
+    if (series[i] != null) return series[i];
+  }
+  return null;
+}
+
+function fmtBurn(v) {
+  return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + ' %/hr';
+}
+
 function computeRangePreset(rows, preset) {
   if (!rows.length) return null;
   const latest = new Date(rows[rows.length - 1].ts);
@@ -2013,7 +2074,7 @@ function renderChart(rows) {
       margin: compact ? { t: 20, r: 18, b: 48, l: 42 } : { t: 24, r: 30, b: 72, l: 60 }
     }, { responsive: true });
     ensureRelayoutBinding();
-    renderSummaryTable(null, null, null, null);
+    renderSummaryTable(null, null, null, null, null, null);
     setChartLoading(false);
     return;
   }
@@ -2093,6 +2154,8 @@ function renderChart(rows) {
   }
 
   const latest = rows[rows.length - 1];
+  const sessionBurnSeries = computeBurnRate(rows, 'session_pct');
+  const weeklyBurnSeries = computeBurnRate(rows, 'weekly_pct');
   statusEl.textContent =
     'Samples: ' + currentTotalSamples +
     ' | Polling interval: __POLL_INTERVAL_SECONDS__s' +
@@ -2101,7 +2164,9 @@ function renderChart(rows) {
     latest,
     expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
-    expectedSonnetData ? expectedSonnetData.expectedNowPct : null
+    expectedSonnetData ? expectedSonnetData.expectedNowPct : null,
+    lastNonNull(sessionBurnSeries),
+    lastNonNull(weeklyBurnSeries)
   );
   maybeNotifyThresholds(
     latest,
