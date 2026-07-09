@@ -11,6 +11,8 @@ utilization over time) in percentage-points per hour (%/hr):
 
 Each mini-chart shows history across the selected range, and the current burn
 rate is surfaced in that chart's header (e.g. "Current session — 4.2 %/hr now").
+The current burn rate is also shown as a value in the Summary table, on the
+Current session and Weekly rows, in %/hr.
 
 ## Motivation
 
@@ -24,6 +26,7 @@ In scope:
 
 - Session and weekly burn-rate history charts.
 - Current (latest) burn-rate value shown per chart.
+- Current burn-rate value in the Summary table (Current session + Weekly rows).
 - Reuse of existing fetched data — no backend/DB changes.
 
 Out of scope (YAGNI):
@@ -71,6 +74,10 @@ suitable for a Plotly trace.
   (from `renderChart`), so the burn charts update live alongside everything
   else and respond to range-preset changes.
 - Each chart's header shows the current (latest non-null) burn rate.
+- `renderSummaryTable` gains a burn-rate value (%/hr) on the Current session and
+  Weekly rows, computed as the latest non-null point from `computeBurnRate`.
+  Whether it is a new column or appended to the existing Usage cell is an
+  implementation detail chosen to fit the table's current layout.
 
 ## Testing
 
@@ -80,6 +87,7 @@ against the live SQLite DB and confirm:
 - Slopes look correct (a climbing usage line yields a positive burn rate).
 - Window resets produce a gap, not a negative spike.
 - Charts update live and follow the range-preset selector.
+- The Summary table burn-rate value matches the latest point on the chart.
 - Layout is reasonable on both wide and compact viewports.
 
 Results shown to the user before the work is called done.
