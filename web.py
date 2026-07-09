@@ -477,6 +477,25 @@ def _index_html(poll_interval_seconds: int) -> str:
       <div id="chart" aria-label="usage chart"></div>
     </section>
 
+    <section class="panel burn-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Rate of change</p>
+          <h2>Burn rate</h2>
+        </div>
+      </div>
+      <div class="burn-charts">
+        <div class="burn-chart-block">
+          <div class="burn-chart-title">Current session <span id="burn-session-now" class="burn-now">-</span></div>
+          <div id="burn-chart-session" aria-label="session burn rate chart"></div>
+        </div>
+        <div class="burn-chart-block">
+          <div class="burn-chart-title">Weekly <span id="burn-weekly-now" class="burn-now">-</span></div>
+          <div id="burn-chart-weekly" aria-label="weekly burn rate chart"></div>
+        </div>
+      </div>
+    </section>
+
     <section id="summary-wrap" class="panel" aria-live="polite">
       <div class="panel-header">
         <div>
@@ -739,6 +758,26 @@ h2 {
   min-height: clamp(320px, 58vh, 560px);
   padding: 4px 6px 0 6px;
 }
+.burn-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.burn-chart-title {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 4px 6px 0 6px;
+}
+.burn-now {
+  color: var(--fg);
+  font-weight: 600;
+  margin-left: 6px;
+}
+#burn-chart-session,
+#burn-chart-weekly {
+  min-height: clamp(160px, 26vh, 260px);
+  padding: 2px 6px 0 6px;
+}
 .chart-loading {
   position: absolute;
   inset: 70px 0 0 0;
@@ -836,6 +875,9 @@ h2 {
     min-height: min(60vh, 420px);
     padding: 0;
   }
+  .burn-charts {
+    grid-template-columns: 1fr;
+  }
   .chart-loading {
     inset: 62px 0 0 0;
   }
@@ -919,6 +961,10 @@ def _app_js(
     poll_ms = poll_interval_seconds * 1000
     js = """
 const chartEl = document.getElementById('chart');
+const burnChartSessionEl = document.getElementById('burn-chart-session');
+const burnChartWeeklyEl = document.getElementById('burn-chart-weekly');
+const burnSessionNowEl = document.getElementById('burn-session-now');
+const burnWeeklyNowEl = document.getElementById('burn-weekly-now');
 const chartLoadingEl = document.getElementById('chart-loading');
 const statusEl = document.getElementById('status');
 const summaryBodyEl = document.getElementById('summary-body');
@@ -2054,6 +2100,46 @@ function applyNotificationSettings(settings, fromSave = false) {
   }
 }
 
+function renderBurnChart(el, x, y, color, xaxisLayout) {
+  const theme = currentTheme();
+  const compact = isCompactViewport();
+  const xaxis = Object.assign({}, xaxisLayout, { title: null });
+  Plotly.react(el, [{
+    x,
+    y,
+    mode: 'lines',
+    line: { color, width: compact ? 1.6 : 2.2 },
+    connectgaps: false,
+    cliponaxis: false,
+    hovertemplate: '%{y:.2f} %/hr<extra></extra>'
+  }], {
+    title: null,
+    uirevision: 'keep-zoom',
+    paper_bgcolor: theme.paperBg,
+    plot_bgcolor: theme.plotBg,
+    font: { color: theme.fg },
+    xaxis,
+    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid },
+    margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
+    showlegend: false
+  }, { responsive: true });
+}
+
+function renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout) {
+  if (!rows.length) {
+    Plotly.react(burnChartSessionEl, [], { uirevision: 'keep-zoom' }, { responsive: true });
+    Plotly.react(burnChartWeeklyEl, [], { uirevision: 'keep-zoom' }, { responsive: true });
+    burnSessionNowEl.textContent = '-';
+    burnWeeklyNowEl.textContent = '-';
+    return;
+  }
+  const x = rows.map((r) => toLocalPlotTs(r.ts));
+  renderBurnChart(burnChartSessionEl, x, sessionBurnSeries, '#1f8deb', xaxisLayout);
+  renderBurnChart(burnChartWeeklyEl, x, weeklyBurnSeries, '#ff6a2b', xaxisLayout);
+  burnSessionNowEl.textContent = fmtBurn(lastNonNull(sessionBurnSeries));
+  burnWeeklyNowEl.textContent = fmtBurn(lastNonNull(weeklyBurnSeries));
+}
+
 function renderChart(rows) {
   const theme = currentTheme();
   const compact = isCompactViewport();
@@ -2075,6 +2161,7 @@ function renderChart(rows) {
     }, { responsive: true });
     ensureRelayoutBinding();
     renderSummaryTable(null, null, null, null, null, null);
+    renderBurnCharts([], [], [], null);
     setChartLoading(false);
     return;
   }
@@ -2207,6 +2294,8 @@ function renderChart(rows) {
       ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 }, traceorder: 'normal' }
       : { orientation: 'h', y: -0.18, yanchor: 'top', traceorder: 'normal' }
   }, { responsive: true });
+
+  renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout);
 
   ensureRelayoutBinding();
   hasInitializedXRange = true;
