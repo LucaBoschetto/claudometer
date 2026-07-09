@@ -1218,7 +1218,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     </div>`;
   }
 
-  // Rows: [metric, usage, reset, alert, expected, overrunAlert, hasExpected]
+  // Rows: [metric, usage, burn, reset, alert, expected, overrunAlert, hasExpected]
   const rows = [
     {
       metric: 'Current session',
@@ -1275,7 +1275,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       return `<tr>
         <td data-cell="metric">${row.metric}</td>
         <td data-label="Usage">${row.usage}</td>
-        <td data-label="Burn rate">${row.burn === undefined || row.burn === null ? '-' : fmtBurn(row.burn)}</td>
+        <td data-label="Burn rate">${fmtBurn(row.burn)}</td>
         <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
         <td data-label="Resets at (Local)">${row.reset || '-'}</td>
         <td data-label="Alert">${row.alert}</td>
@@ -1795,11 +1795,11 @@ function computeBurnRate(rows, key, windowMinutes = 30) {
   return out;
 }
 
-function lastNonNull(series) {
-  for (let i = series.length - 1; i >= 0; i -= 1) {
-    if (series[i] != null) return series[i];
-  }
-  return null;
+// Current burn rate = the latest aligned point. When the most recent sample is
+// a reset, that point is null and we report "-" rather than an earlier
+// (pre-reset) slope, which would be stale.
+function currentBurn(series) {
+  return series.length ? (series[series.length - 1] ?? null) : null;
 }
 
 function fmtBurn(v) {
@@ -1890,6 +1890,18 @@ function backendRangePreset() {
 }
 
 
+// The burn charts are separate Plotly plots, so a manual zoom/pan on the main
+// chart doesn't reach them. Mirror the main chart's x-range onto them from the
+// relayout handler so they stay in sync without waiting for the next refresh.
+function syncBurnChartsXRange(range) {
+  const update = range
+    ? { 'xaxis.range': range, 'xaxis.autorange': false }
+    : { 'xaxis.autorange': true };
+  [burnChartSessionEl, burnChartWeeklyEl].forEach((el) => {
+    if (el && el.data) Plotly.relayout(el, update);
+  });
+}
+
 function ensureRelayoutBinding() {
   if (hasBoundRelayout) return;
   if (typeof chartEl.on !== 'function') return;
@@ -1900,9 +1912,11 @@ function ensureRelayoutBinding() {
       rangePreset = 'manual';
       rangePresetEl.value = 'manual';
       storageSet('tracker_range_preset', rangePreset);
+      syncBurnChartsXRange(userXRange);
     }
     if (evt['xaxis.autorange'] === true) {
       userXRange = null;
+      syncBurnChartsXRange(null);
     }
   });
   hasBoundRelayout = true;
@@ -2100,10 +2114,24 @@ function applyNotificationSettings(settings, fromSave = false) {
   }
 }
 
-function renderBurnChart(el, x, y, color, xaxisLayout) {
+function burnLayout(xaxisLayout) {
   const theme = currentTheme();
   const compact = isCompactViewport();
-  const xaxis = Object.assign({}, xaxisLayout, { title: null });
+  return {
+    title: null,
+    uirevision: 'keep-zoom',
+    paper_bgcolor: theme.paperBg,
+    plot_bgcolor: theme.plotBg,
+    font: { color: theme.fg },
+    xaxis: Object.assign({}, xaxisLayout, { title: null }),
+    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid },
+    margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
+    showlegend: false
+  };
+}
+
+function renderBurnChart(el, x, y, color, xaxisLayout) {
+  const compact = isCompactViewport();
   Plotly.react(el, [{
     x,
     y,
@@ -2112,23 +2140,13 @@ function renderBurnChart(el, x, y, color, xaxisLayout) {
     connectgaps: false,
     cliponaxis: false,
     hovertemplate: '%{y:.2f} %/hr<extra></extra>'
-  }], {
-    title: null,
-    uirevision: 'keep-zoom',
-    paper_bgcolor: theme.paperBg,
-    plot_bgcolor: theme.plotBg,
-    font: { color: theme.fg },
-    xaxis,
-    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid },
-    margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
-    showlegend: false
-  }, { responsive: true });
+  }], burnLayout(xaxisLayout), { responsive: true });
 }
 
 function renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout) {
   if (!rows.length) {
-    Plotly.react(burnChartSessionEl, [], { uirevision: 'keep-zoom' }, { responsive: true });
-    Plotly.react(burnChartWeeklyEl, [], { uirevision: 'keep-zoom' }, { responsive: true });
+    Plotly.react(burnChartSessionEl, [], burnLayout(null), { responsive: true });
+    Plotly.react(burnChartWeeklyEl, [], burnLayout(null), { responsive: true });
     burnSessionNowEl.textContent = '-';
     burnWeeklyNowEl.textContent = '-';
     return;
@@ -2136,8 +2154,8 @@ function renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout
   const x = rows.map((r) => toLocalPlotTs(r.ts));
   renderBurnChart(burnChartSessionEl, x, sessionBurnSeries, '#1f8deb', xaxisLayout);
   renderBurnChart(burnChartWeeklyEl, x, weeklyBurnSeries, '#ff6a2b', xaxisLayout);
-  burnSessionNowEl.textContent = fmtBurn(lastNonNull(sessionBurnSeries));
-  burnWeeklyNowEl.textContent = fmtBurn(lastNonNull(weeklyBurnSeries));
+  burnSessionNowEl.textContent = fmtBurn(currentBurn(sessionBurnSeries));
+  burnWeeklyNowEl.textContent = fmtBurn(currentBurn(weeklyBurnSeries));
 }
 
 function renderChart(rows) {
@@ -2252,8 +2270,8 @@ function renderChart(rows) {
     expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
     expectedSonnetData ? expectedSonnetData.expectedNowPct : null,
-    lastNonNull(sessionBurnSeries),
-    lastNonNull(weeklyBurnSeries)
+    currentBurn(sessionBurnSeries),
+    currentBurn(weeklyBurnSeries)
   );
   maybeNotifyThresholds(
     latest,
