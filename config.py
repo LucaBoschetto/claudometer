@@ -13,6 +13,12 @@ DB_PATH = RUNTIME_DIR / "usage.db"
 LOG_PATH = RUNTIME_DIR / "dashboard.log"
 BROWSER_PROFILE_DIR = RUNTIME_DIR / "browser-profile"
 
+# Trailing window for the dashboard's burn-rate math (computeBurnRate in
+# web.py). db.py's range=all collapse must keep enough points to sample the
+# decay across this window, so the server, the served JS and the tests all read
+# it from here rather than each hardcoding 30.
+BURN_WINDOW_MINUTES = 30
+
 RUNTIME_ENV_ORDER = (
     "CLAUDE_ORG_ID",
     "CLAUDE_COOKIE_HEADER",

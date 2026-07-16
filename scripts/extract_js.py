@@ -14,6 +14,10 @@ import sys
 
 WEB_PY = pathlib.Path(__file__).resolve().parent.parent / "web.py"
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from config import BURN_WINDOW_MINUTES
+
 # Everything computeBurnRate transitively needs, plus the view-mode pipeline it
 # now reads through.
 FUNCTIONS = [
@@ -51,6 +55,9 @@ def main() -> None:
         "// seriesFor reads this module-global in web.py; the tests set it.",
         'let viewMode = "raw";',
         "export function setViewMode(mode) { viewMode = mode; }",
+        "// computeBurnRate reads this module-global in web.py, where it is",
+        "// templated from config.BURN_WINDOW_MINUTES. Keep them in sync.",
+        f"const BURN_WINDOW_MINUTES = {BURN_WINDOW_MINUTES};",
     ]
     parts += [extract(src, name) for name in FUNCTIONS]
     parts.append("export { %s };" % ", ".join(FUNCTIONS))
