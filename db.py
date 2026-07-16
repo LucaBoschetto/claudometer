@@ -68,6 +68,15 @@ LEGACY_USAGE_LOG_EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _normalize_range(range_preset: str) -> str:
+    """Fold unknown presets onto "all".
+
+    Both the SQL window and the expand/collapse choice must agree on this, or a
+    bogus range gets the all-window with per-sample expansion.
+    """
+    return range_preset if range_preset in {"today", "weekly_cycle", "all"} else "all"
+
+
 class UsageDB:
     def __init__(self, path: Path):
         self.path = path
@@ -232,11 +241,19 @@ class UsageDB:
                 ).fetchall()
 
         payload_runs = [self._run_row_to_dict(row) for row in runs]
+        # range=all spans the whole history, where per-sample expansion is ~100k
+        # collinear points and ~29 MB of JSON. The zoomed presets are small and
+        # their fidelity is visible, so they keep the full expansion.
+        to_rows = (
+            self._collapse_run
+            if _normalize_range(range_preset) == "all"
+            else self._expand_run
+        )
         expanded_rows: list[dict[str, Any]] = []
         filtered_samples = 0
         for run in payload_runs:
             filtered_samples += int(run["sample_count"])
-            expanded_rows.extend(self._expand_run(run))
+            expanded_rows.extend(to_rows(run))
         return {
             "rows": expanded_rows,
             "total_samples": total_samples,
@@ -247,7 +264,7 @@ class UsageDB:
     def _range_window(
         self, conn: sqlite3.Connection, range_preset: str
     ) -> tuple[str | None, str | None]:
-        normalized = range_preset if range_preset in {"today", "weekly_cycle", "all"} else "all"
+        normalized = _normalize_range(range_preset)
         if normalized == "all":
             return (None, None)
 

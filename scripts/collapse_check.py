@@ -12,7 +12,9 @@ Run: python scripts/collapse_check.py
 from __future__ import annotations
 
 import pathlib
+import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -110,6 +112,58 @@ check("long run -> timestamps strictly increasing", all(a < b for a, b in zip(ts
 values = [{k: v for k, v in r.items() if k != "ts"} for r in rows]
 check("long run -> all points carry identical values", all(v == values[0] for v in values))
 check("long run -> values match the run", values[0]["session_pct"] == 10.0)
+
+print()
+print("fetch_chart_data:")
+
+RUN_COLUMNS = (
+    "ts_start", "ts_end", "sample_count", "session_pct", "session_resets",
+    "weekly_pct", "weekly_resets", "extra_pct", "extra_enabled",
+    "extra_used_credits", "extra_monthly_limit", "sonnet_pct",
+)
+
+with tempfile.TemporaryDirectory() as tmp:
+    db = UsageDB(pathlib.Path(tmp) / "usage.db")
+    db.init()
+    # One long idle run (collapses to 6) and one short run (collapses to 2).
+    seed = [
+        make_run(minutes=3 * 24 * 60, count=4320),
+        make_run(minutes=10, count=10, ts_start=(T0 + timedelta(days=3)).isoformat(),
+                 ts_end=(T0 + timedelta(days=3, minutes=10)).isoformat()),
+    ]
+    with sqlite3.connect(db.path) as conn:
+        for run in seed:
+            conn.execute(
+                f"INSERT INTO usage_runs ({','.join(RUN_COLUMNS)}) "
+                f"VALUES ({','.join('?' * len(RUN_COLUMNS))})",
+                tuple(run[c] for c in RUN_COLUMNS),
+            )
+        conn.commit()
+
+    expanded_total = 4320 + 10
+    collapsed_total = LONG_RUN_POINTS + 2  # long run + short run's endpoints
+
+    all_payload = db.fetch_chart_data("all")
+    check("range=all -> collapsed rows", len(all_payload["rows"]) == collapsed_total)
+    check("range=all -> total_samples counts real samples, not rows",
+          all_payload["total_samples"] == expanded_total)
+    check("range=all -> filtered_samples counts real samples",
+          all_payload["filtered_samples"] == expanded_total)
+    check("range=all -> run_count unchanged", all_payload["run_count"] == 2)
+
+    # An unknown range normalizes to "all" in _range_window, so it must collapse
+    # too. Otherwise it would get the all-window but 4330 expanded rows.
+    bogus = db.fetch_chart_data("nonsense")
+    check("unknown range -> collapses like all",
+          len(bogus["rows"]) == len(all_payload["rows"]))
+
+    # The zoomed presets must keep full per-sample expansion. The exact count is
+    # timezone-dependent (the "today" window is derived from the latest ts_end in
+    # local time), but expansion always yields strictly more rows than the
+    # collapse would, and the latest run always falls inside the window.
+    today = db.fetch_chart_data("today")
+    check("range=today -> still expands (not collapsed)",
+          len(today["rows"]) > collapsed_total)
 
 print()
 if failures:
