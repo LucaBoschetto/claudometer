@@ -758,6 +758,9 @@ h2 {
   min-height: clamp(320px, 58vh, 560px);
   padding: 4px 6px 0 6px;
 }
+.burn-panel {
+  margin-top: 14px;
+}
 .burn-charts {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1753,7 +1756,11 @@ function maskedSeries(rows, key, predicate) {
 // within the trailing `windowMinutes`. A step where usage drops (a window
 // reset, or a downward correction) is dropped, so a reset reads as a gap
 // rather than a large negative spike. Result is aligned 1:1 with `rows`.
-function computeBurnRate(rows, key, windowMinutes = 30) {
+//
+// `values` is the already-view-adjusted series (see seriesFor), not raw row
+// fields: an isolated spike in raw data would otherwise read as a huge slope
+// and then trip the drop check below, blanking the window on its way back down.
+function computeBurnRate(rows, values, windowMinutes = 30) {
   const n = rows.length;
   const out = new Array(n).fill(null);
   if (n < 2) return out;
@@ -1765,8 +1772,8 @@ function computeBurnRate(rows, key, windowMinutes = 30) {
   const slope = new Array(n).fill(null);
   const reset = new Array(n).fill(false);
   for (let i = 1; i < n; i += 1) {
-    const v0 = rows[i - 1][key];
-    const v1 = rows[i][key];
+    const v0 = values[i - 1];
+    const v1 = values[i];
     if (v0 == null || v1 == null) continue;
     if (Number.isNaN(times[i]) || Number.isNaN(times[i - 1])) continue;
     const dtHours = (times[i] - times[i - 1]) / 3600000;
@@ -2188,6 +2195,10 @@ function renderChart(rows) {
 
   const x = rows.map((r) => toLocalPlotTs(r.ts));
   const hasSonnet = rows.some((r) => r.sonnet_pct !== null && r.sonnet_pct !== undefined);
+  // Shared by the usage traces and the burn-rate charts, so both reflect the
+  // same view mode.
+  const sessionValues = seriesFor(rows, 'session_pct');
+  const weeklyValues = seriesFor(rows, 'weekly_pct');
   const traces = [
     {
       x,
@@ -2211,7 +2222,7 @@ function renderChart(rows) {
     },
     {
       x,
-      y: seriesFor(rows, 'session_pct'),
+      y: sessionValues,
       mode: 'lines+markers',
       name: 'Current session',
       line: { color: '#1f8deb', width: lineWidth },
@@ -2221,7 +2232,7 @@ function renderChart(rows) {
     },
     {
       x,
-      y: seriesFor(rows, 'weekly_pct'),
+      y: weeklyValues,
       mode: 'lines+markers',
       name: 'Weekly',
       line: { color: '#ff6a2b', width: lineWidth },
@@ -2261,8 +2272,8 @@ function renderChart(rows) {
   }
 
   const latest = rows[rows.length - 1];
-  const sessionBurnSeries = computeBurnRate(rows, 'session_pct');
-  const weeklyBurnSeries = computeBurnRate(rows, 'weekly_pct');
+  const sessionBurnSeries = computeBurnRate(rows, sessionValues);
+  const weeklyBurnSeries = computeBurnRate(rows, weeklyValues);
   statusEl.textContent =
     'Samples: ' + currentTotalSamples +
     ' | Polling interval: __POLL_INTERVAL_SECONDS__s' +
