@@ -7,7 +7,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from config import BURN_WINDOW_MINUTES
 from models import UsageSample
+
+# Interior points emitted across the burn window of a long run. The burn-rate
+# series decays over BURN_WINDOW_MINUTES after the step into a run; without
+# these, a multi-day idle run draws that decay as a multi-day ramp. Four caps
+# every in-window gap at 7.5 minutes, which is ~0.04px at range=all.
+COLLAPSE_DECAY_POINTS = 4
+
+_BURN_WINDOW = timedelta(minutes=BURN_WINDOW_MINUTES)
 
 
 LEGACY_USAGE_LOG_SCHEMA_SQL = """
@@ -501,6 +510,42 @@ class UsageDB:
                 point_dt = end_dt
             rows.append(self._expanded_row(run, point_dt.astimezone(timezone.utc).isoformat()))
         return rows
+
+    def _collapse_run(self, run: dict[str, Any]) -> list[dict[str, Any]]:
+        """Emit the fewest points that redraw this run.
+
+        usage_runs is run-length encoded: every sample in a run carries the same
+        values, so the run draws as a flat segment and _expand_run's interior
+        points are collinear duplicates sitting on invented evenly-spaced
+        timestamps. Only the endpoints carry shape, and _expand_run pins its
+        first point at ts_start and its last at ts_end, so emitting those two
+        reproduces the identical polyline.
+
+        The burn-rate series is the exception. It is derived, so it is *not*
+        constant within a run: it decays across the burn window after the step
+        into the run, then sits at zero. Endpoints alone would draw that decay
+        as a ramp spanning the whole run, so long runs also get interior points
+        across the window.
+
+        Only used for range=all; the zoomed presets keep _expand_run.
+        """
+        count = max(1, int(run["sample_count"]))
+        start_dt = _parse_iso(run["ts_start"])
+        end_dt = _parse_iso(run["ts_end"])
+        if count == 1 or start_dt is None or end_dt is None or end_dt <= start_dt:
+            # No span to draw. _expand_run emits `count` duplicates at the same
+            # instant here, which is visually this same single point.
+            return [self._expanded_row(run, run["ts_start"])]
+
+        points = [start_dt]
+        if (end_dt - start_dt) > _BURN_WINDOW:
+            for index in range(1, COLLAPSE_DECAY_POINTS + 1):
+                points.append(start_dt + _BURN_WINDOW * (index / COLLAPSE_DECAY_POINTS))
+        points.append(end_dt)
+        return [
+            self._expanded_row(run, point.astimezone(timezone.utc).isoformat())
+            for point in points
+        ]
 
     def _expanded_row(self, run: dict[str, Any], ts: str) -> dict[str, Any]:
         return {
