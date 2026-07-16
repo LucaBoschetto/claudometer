@@ -33,3 +33,4 @@ Thumbs.db
 
 # Local capture artifacts
 curl.txt
+scripts/shipped.mjs

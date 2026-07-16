@@ -477,6 +477,25 @@ def _index_html(poll_interval_seconds: int) -> str:
       <div id="chart" aria-label="usage chart"></div>
     </section>
 
+    <section class="panel burn-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Rate of change</p>
+          <h2>Burn rate</h2>
+        </div>
+      </div>
+      <div class="burn-charts">
+        <div class="burn-chart-block">
+          <div class="burn-chart-title">Current session <span id="burn-session-now" class="burn-now">-</span></div>
+          <div id="burn-chart-session" aria-label="session burn rate chart"></div>
+        </div>
+        <div class="burn-chart-block">
+          <div class="burn-chart-title">Weekly <span id="burn-weekly-now" class="burn-now">-</span></div>
+          <div id="burn-chart-weekly" aria-label="weekly burn rate chart"></div>
+        </div>
+      </div>
+    </section>
+
     <section id="summary-wrap" class="panel" aria-live="polite">
       <div class="panel-header">
         <div>
@@ -497,6 +516,7 @@ def _index_html(poll_interval_seconds: int) -> str:
           <tr>
             <th>Metric</th>
             <th>Usage</th>
+            <th>Burn rate</th>
             <th>Expected</th>
             <th>Resets at (Local)</th>
             <th>Alert</th>
@@ -738,6 +758,32 @@ h2 {
   min-height: clamp(320px, 58vh, 560px);
   padding: 4px 6px 0 6px;
 }
+.burn-panel {
+  margin-top: 14px;
+}
+.burn-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  /* Matches .panel-header's horizontal padding so each chart title lines up
+     with the panel heading above it. */
+  padding: 0 20px;
+}
+.burn-chart-title {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 4px 0 0 0;
+}
+.burn-now {
+  color: var(--fg);
+  font-weight: 600;
+  margin-left: 6px;
+}
+#burn-chart-session,
+#burn-chart-weekly {
+  min-height: clamp(160px, 26vh, 260px);
+  padding: 2px 0 0 0;
+}
 .chart-loading {
   position: absolute;
   inset: 70px 0 0 0;
@@ -796,8 +842,8 @@ h2 {
   color: var(--muted);
   font-weight: 500;
 }
-#summary-table th:nth-child(5),
-#summary-table td:nth-child(5) {
+#summary-table th:nth-child(6),
+#summary-table td:nth-child(6) {
   border-left: 1px solid var(--line);
 }
 #summary-table tbody tr:last-child td { border-bottom: none; }
@@ -834,6 +880,10 @@ h2 {
   #chart {
     min-height: min(60vh, 420px);
     padding: 0;
+  }
+  .burn-charts {
+    grid-template-columns: 1fr;
+    padding: 0 16px;
   }
   .chart-loading {
     inset: 62px 0 0 0;
@@ -873,7 +923,7 @@ h2 {
   #summary-table td.cell-hidden {
     display: none;
   }
-  #summary-table td:nth-child(5) {
+  #summary-table td:nth-child(6) {
     border-left: none;
   }
   #summary-table td::before {
@@ -918,6 +968,10 @@ def _app_js(
     poll_ms = poll_interval_seconds * 1000
     js = """
 const chartEl = document.getElementById('chart');
+const burnChartSessionEl = document.getElementById('burn-chart-session');
+const burnChartWeeklyEl = document.getElementById('burn-chart-weekly');
+const burnSessionNowEl = document.getElementById('burn-session-now');
+const burnWeeklyNowEl = document.getElementById('burn-weekly-now');
 const chartLoadingEl = document.getElementById('chart-loading');
 const statusEl = document.getElementById('status');
 const summaryBodyEl = document.getElementById('summary-body');
@@ -1149,7 +1203,7 @@ function fmtPct(v) {
   return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + '%';
 }
 
-function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct) {
+function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct, sessionBurnNow, weeklyBurnNow) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
   const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
 
@@ -1171,11 +1225,11 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     </div>`;
   }
 
-  // Rows: [metric, usage, reset, alert, expected, overrunAlert, hasExpected]
   const rows = [
     {
       metric: 'Current session',
       usage: fmtPct(latest ? latest.session_pct : null),
+      burn: sessionBurnNow ?? null,
       reset: fmtReset(latest ? latest.session_resets : null),
       alert: makeThresholdAlert('session_threshold_pct', alertSettingsDraft.session_threshold_pct),
       expected: fmtPct(expectedSessionNowPct),
@@ -1186,6 +1240,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     {
       metric: 'Weekly',
       usage: fmtPct(latest ? latest.weekly_pct : null),
+      burn: weeklyBurnNow ?? null,
       reset: fmtReset(latest ? latest.weekly_resets : null),
       alert: makeThresholdAlert('weekly_threshold_pct', alertSettingsDraft.weekly_threshold_pct),
       expected: fmtPct(expectedWeeklyNowPct),
@@ -1226,6 +1281,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       return `<tr>
         <td data-cell="metric">${row.metric}</td>
         <td data-label="Usage">${row.usage}</td>
+        <td data-label="Burn rate">${fmtBurn(row.burn)}</td>
         <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
         <td data-label="Resets at (Local)">${row.reset || '-'}</td>
         <td data-label="Alert">${row.alert}</td>
@@ -1699,6 +1755,70 @@ function maskedSeries(rows, key, predicate) {
   return values.map((value, index) => predicate(rows[index]) ? value : null);
 }
 
+// Burn rate: rate of utilization climb in percentage-points per hour.
+// Each output point is the time-weighted average of adjacent-sample slopes
+// within the trailing `windowMinutes`. A step where usage drops (a window
+// reset, or a downward correction) is dropped, so a reset reads as a gap
+// rather than a large negative spike. Result is aligned 1:1 with `rows`.
+//
+// `values` is the already-view-adjusted series (see seriesFor), not raw row
+// fields: an isolated spike in raw data would otherwise read as a huge slope
+// and then trip the drop check below, blanking the window on its way back down.
+function computeBurnRate(rows, values, windowMinutes = 30) {
+  const n = rows.length;
+  const out = new Array(n).fill(null);
+  if (n < 2) return out;
+
+  const times = rows.map((r) => new Date(r.ts).getTime());
+
+  // slope[i] = %/hr for the step ending at sample i (from i-1 to i).
+  // reset[i] marks a step where usage dropped (a window reset or correction).
+  const slope = new Array(n).fill(null);
+  const reset = new Array(n).fill(false);
+  for (let i = 1; i < n; i += 1) {
+    const v0 = values[i - 1];
+    const v1 = values[i];
+    if (v0 == null || v1 == null) continue;
+    if (Number.isNaN(times[i]) || Number.isNaN(times[i - 1])) continue;
+    const dtHours = (times[i] - times[i - 1]) / 3600000;
+    if (dtHours <= 0) continue;
+    if (v1 < v0) { reset[i] = true; continue; } // no valid burn rate across a reset
+    slope[i] = (v1 - v0) / dtHours;
+  }
+
+  const windowMs = windowMinutes * 60 * 1000;
+  for (let i = 1; i < n; i += 1) {
+    if (Number.isNaN(times[i])) continue;
+    const windowStart = times[i] - windowMs;
+    let weighted = 0;
+    let weight = 0;
+    for (let j = i; j >= 1; j -= 1) {
+      if (times[j] < windowStart) break; // step ends before the trailing window
+      if (reset[j]) break; // don't average across a reset boundary
+      if (slope[j] == null) continue;
+      // Clip the step to the window so one straddling the boundary contributes
+      // only its in-window duration (e.g. a long step after sleep/pause).
+      const stepMs = times[j] - Math.max(times[j - 1], windowStart);
+      if (!(stepMs > 0)) continue;
+      weighted += slope[j] * stepMs;
+      weight += stepMs;
+    }
+    if (weight > 0) out[i] = weighted / weight;
+  }
+  return out;
+}
+
+// Current burn rate = the latest aligned point. When the most recent sample is
+// a reset, that point is null and we report "-" rather than an earlier
+// (pre-reset) slope, which would be stale.
+function currentBurn(series) {
+  return series.length ? (series[series.length - 1] ?? null) : null;
+}
+
+function fmtBurn(v) {
+  return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + ' %/hr';
+}
+
 function computeRangePreset(rows, preset) {
   if (!rows.length) return null;
   const latest = new Date(rows[rows.length - 1].ts);
@@ -1783,6 +1903,18 @@ function backendRangePreset() {
 }
 
 
+// The burn charts are separate Plotly plots, so a manual zoom/pan on the main
+// chart doesn't reach them. Mirror the main chart's x-range onto them from the
+// relayout handler so they stay in sync without waiting for the next refresh.
+function syncBurnChartsXRange(range) {
+  const update = range
+    ? { 'xaxis.range': range, 'xaxis.autorange': false }
+    : { 'xaxis.autorange': true };
+  [burnChartSessionEl, burnChartWeeklyEl].forEach((el) => {
+    if (el && el.data) Plotly.relayout(el, update);
+  });
+}
+
 function ensureRelayoutBinding() {
   if (hasBoundRelayout) return;
   if (typeof chartEl.on !== 'function') return;
@@ -1793,9 +1925,11 @@ function ensureRelayoutBinding() {
       rangePreset = 'manual';
       rangePresetEl.value = 'manual';
       storageSet('tracker_range_preset', rangePreset);
+      syncBurnChartsXRange(userXRange);
     }
     if (evt['xaxis.autorange'] === true) {
       userXRange = null;
+      syncBurnChartsXRange(null);
     }
   });
   hasBoundRelayout = true;
@@ -1993,6 +2127,58 @@ function applyNotificationSettings(settings, fromSave = false) {
   }
 }
 
+function burnLayout(xaxisLayout) {
+  const theme = currentTheme();
+  const compact = isCompactViewport();
+  return {
+    title: null,
+    uirevision: 'keep-zoom',
+    paper_bgcolor: theme.paperBg,
+    plot_bgcolor: theme.plotBg,
+    font: { color: theme.fg },
+    // These charts are ~half the width of the main one, so the inherited
+    // '%Y-%m-%d %H:%M' ticks rotate steeply and eat the plot area. Drop the
+    // year (the main chart directly above carries it) and let automargin size
+    // the bottom margin from the rendered labels instead of a fixed guess.
+    xaxis: Object.assign({}, xaxisLayout, {
+      title: null,
+      tickformat: '%m-%d %H:%M',
+      automargin: true
+    }),
+    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid, automargin: true },
+    margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
+    showlegend: false
+  };
+}
+
+function renderBurnChart(el, x, y, color, xaxisLayout) {
+  const compact = isCompactViewport();
+  Plotly.react(el, [{
+    x,
+    y,
+    mode: 'lines',
+    line: { color, width: compact ? 1.6 : 2.2 },
+    connectgaps: false,
+    cliponaxis: false,
+    hovertemplate: '%{y:.2f} %/hr<extra></extra>'
+  }], burnLayout(xaxisLayout), { responsive: true });
+}
+
+function renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout) {
+  if (!rows.length) {
+    Plotly.react(burnChartSessionEl, [], burnLayout(null), { responsive: true });
+    Plotly.react(burnChartWeeklyEl, [], burnLayout(null), { responsive: true });
+    burnSessionNowEl.textContent = '-';
+    burnWeeklyNowEl.textContent = '-';
+    return;
+  }
+  const x = rows.map((r) => toLocalPlotTs(r.ts));
+  renderBurnChart(burnChartSessionEl, x, sessionBurnSeries, '#1f8deb', xaxisLayout);
+  renderBurnChart(burnChartWeeklyEl, x, weeklyBurnSeries, '#ff6a2b', xaxisLayout);
+  burnSessionNowEl.textContent = fmtBurn(currentBurn(sessionBurnSeries));
+  burnWeeklyNowEl.textContent = fmtBurn(currentBurn(weeklyBurnSeries));
+}
+
 function renderChart(rows) {
   const theme = currentTheme();
   const compact = isCompactViewport();
@@ -2013,13 +2199,18 @@ function renderChart(rows) {
       margin: compact ? { t: 20, r: 18, b: 48, l: 42 } : { t: 24, r: 30, b: 72, l: 60 }
     }, { responsive: true });
     ensureRelayoutBinding();
-    renderSummaryTable(null, null, null, null);
+    renderSummaryTable(null, null, null, null, null, null);
+    renderBurnCharts([], [], [], null);
     setChartLoading(false);
     return;
   }
 
   const x = rows.map((r) => toLocalPlotTs(r.ts));
   const hasSonnet = rows.some((r) => r.sonnet_pct !== null && r.sonnet_pct !== undefined);
+  // Shared by the usage traces and the burn-rate charts, so both reflect the
+  // same view mode.
+  const sessionValues = seriesFor(rows, 'session_pct');
+  const weeklyValues = seriesFor(rows, 'weekly_pct');
   const traces = [
     {
       x,
@@ -2043,7 +2234,7 @@ function renderChart(rows) {
     },
     {
       x,
-      y: seriesFor(rows, 'session_pct'),
+      y: sessionValues,
       mode: 'lines+markers',
       name: 'Current session',
       line: { color: '#1f8deb', width: lineWidth },
@@ -2053,7 +2244,7 @@ function renderChart(rows) {
     },
     {
       x,
-      y: seriesFor(rows, 'weekly_pct'),
+      y: weeklyValues,
       mode: 'lines+markers',
       name: 'Weekly',
       line: { color: '#ff6a2b', width: lineWidth },
@@ -2093,6 +2284,8 @@ function renderChart(rows) {
   }
 
   const latest = rows[rows.length - 1];
+  const sessionBurnSeries = computeBurnRate(rows, sessionValues);
+  const weeklyBurnSeries = computeBurnRate(rows, weeklyValues);
   statusEl.textContent =
     'Samples: ' + currentTotalSamples +
     ' | Polling interval: __POLL_INTERVAL_SECONDS__s' +
@@ -2101,7 +2294,9 @@ function renderChart(rows) {
     latest,
     expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
-    expectedSonnetData ? expectedSonnetData.expectedNowPct : null
+    expectedSonnetData ? expectedSonnetData.expectedNowPct : null,
+    currentBurn(sessionBurnSeries),
+    currentBurn(weeklyBurnSeries)
   );
   maybeNotifyThresholds(
     latest,
@@ -2142,6 +2337,8 @@ function renderChart(rows) {
       ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 }, traceorder: 'normal' }
       : { orientation: 'h', y: -0.18, yanchor: 'top', traceorder: 'normal' }
   }, { responsive: true });
+
+  renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout);
 
   ensureRelayoutBinding();
   hasInitializedXRange = true;
