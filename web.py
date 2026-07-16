@@ -2137,9 +2137,14 @@ function burnLayout(xaxisLayout) {
     plot_bgcolor: theme.plotBg,
     font: { color: theme.fg },
     // These charts are ~half the width of the main one, so the inherited
-    // '%Y-%m-%d %H:%M' ticks rotate steeply and overflow a fixed bottom
-    // margin; automargin reserves whatever the rendered labels actually need.
-    xaxis: Object.assign({}, xaxisLayout, { title: null, automargin: true }),
+    // '%Y-%m-%d %H:%M' ticks rotate steeply and eat the plot area. Drop the
+    // year (the main chart directly above carries it) and let automargin size
+    // the bottom margin from the rendered labels instead of a fixed guess.
+    xaxis: Object.assign({}, xaxisLayout, {
+      title: null,
+      tickformat: '%m-%d %H:%M',
+      automargin: true
+    }),
     yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid, automargin: true },
     margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
     showlegend: false
