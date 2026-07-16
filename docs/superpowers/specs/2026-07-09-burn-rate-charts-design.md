@@ -45,7 +45,11 @@ is derived entirely in the browser from data already fetched. No changes to
 
 ## Computation
 
-New function `computeBurnRate(rows, key, windowMinutes = 30)`:
+New function `computeBurnRate(rows, values, windowMinutes = 30)`, where `values`
+is the already view-adjusted series from `seriesFor(rows, key)` rather than a raw
+row field, so the burn rate follows the Raw/Cleaned/Smoothed selector and an
+isolated spike does not read as a huge slope (and then as a reset on its way
+back down):
 
 1. **Adjacent slopes.** For each consecutive pair of samples, compute
    `(pct[i] - pct[i-1]) / hoursBetween(i-1, i)` in %/hr.
@@ -56,8 +60,10 @@ New function `computeBurnRate(rows, key, windowMinutes = 30)`:
    if finer boundary detection is ever needed.
 3. **Rolling window.** Each output point's burn rate is the time-weighted
    average of adjacent slopes falling within the trailing ~30 minutes, so the
-   line is calm but still tracks recent activity. Points with no valid slopes in
-   the window (e.g. right after a reset) are `null`.
+   line is calm but still tracks recent activity. Each step's weight is clipped
+   at the window boundary, so a step straddling it (e.g. one long gap after the
+   machine slept) contributes only its in-window duration. Points with no valid
+   slopes in the window (e.g. right after a reset) are `null`.
 
 The result is an array aligned to the same x (time) axis as the source rows,
 suitable for a Plotly trace.
@@ -70,12 +76,17 @@ suitable for a Plotly trace.
   y-axis (so the ~30x scale difference between session and weekly each read
   clearly), sharing the main chart's theme and x-range behavior.
 - Line colors match the main chart: session `#1f8deb`, weekly `#ff6a2b`.
-- A new `renderBurnCharts(rows)` is called from the existing refresh path
-  (from `renderChart`), so the burn charts update live alongside everything
-  else and respond to range-preset changes.
-- Each chart's header shows the current (latest non-null) burn rate.
+- A new `renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout)`
+  is called from the existing refresh path (from `renderChart`), so the burn
+  charts update live alongside everything else and respond to range-preset
+  changes. Manual zoom/pan on the main chart is mirrored onto them from its
+  `plotly_relayout` handler, since they are separate plots.
+- Each chart's header shows the current burn rate, meaning the latest aligned
+  point (`currentBurn`). When the newest sample is a reset that point is `null`
+  and the header reads `-`; it deliberately does not walk back to an earlier
+  slope, which would report stale pre-reset burn as if it were current.
 - `renderSummaryTable` gains a burn-rate value (%/hr) on the Current session and
-  Weekly rows, computed as the latest non-null point from `computeBurnRate`.
+  Weekly rows, taken from that same latest aligned point.
   Whether it is a new column or appended to the existing Usage cell is an
   implementation detail chosen to fit the table's current layout.
 
