@@ -987,6 +987,7 @@ const themeToggleEl = document.getElementById('theme-toggle');
 
 const expectedLineEnabled = __EXPECTED_LINE_ENABLED__;
 const BURN_WINDOW_MINUTES = __BURN_WINDOW_MINUTES__;
+const RESIZE_DEBOUNCE_MS = 150;
 const expectedActiveStart = '__EXPECTED_ACTIVE_START__';
 const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
 let notifySessionThresholdPct = __NOTIFY_SESSION_THRESHOLD_PCT__;
@@ -2369,7 +2370,16 @@ async function refreshData() {
 bindControls();
 renderChart([]);
 refreshData();
-window.addEventListener('resize', () => rerenderChartWithLoading(currentRows));
+// Resize fires continuously while dragging, and each re-render is a full
+// Plotly redraw. Coalesce the burst into one render.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (resizeTimer !== null) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    rerenderChartWithLoading(currentRows);
+  }, RESIZE_DEBOUNCE_MS);
+});
 setInterval(refreshData, __POLL_MS__);
 """
     return (
