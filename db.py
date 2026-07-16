@@ -536,13 +536,22 @@ class UsageDB:
         points are collinear duplicates sitting on invented evenly-spaced
         timestamps. Only the endpoints carry shape, and _expand_run pins its
         first point at ts_start and its last at ts_end, so emitting those two
-        reproduces the identical polyline.
+        reproduces the identical polyline in the 'raw' and 'clean' view modes.
 
-        The burn-rate series is the exception. It is derived, so it is *not*
-        constant within a run: it decays across the burn window after the step
-        into the run, then sits at zero. Endpoints alone would draw that decay
-        as a ramp spanning the whole run, so long runs also get interior points
-        across the window.
+        'smooth' is the exception: seriesFor's smoothMoving averages by array
+        index, not by time, so collapsing a run changes index spacing and is
+        not exactly invariant there. For long runs, the mirrored point before
+        ts_end (below) bounds that error at the run's end to one point spacing
+        (sub-pixel at range=all) instead of letting it span the whole run.
+        Short runs (duration <= _BURN_WINDOW) still draw with only two points,
+        so both of those can be pulled toward neighboring runs over up to
+        _BURN_WINDOW; 'smooth' is therefore not guaranteed pixel-identical
+        overall, only closer than without this fix.
+
+        The burn-rate series is also *not* constant within a run: it decays
+        across the burn window after the step into the run, then sits at zero.
+        Endpoints alone would draw that decay as a ramp spanning the whole run,
+        so long runs also get interior points across the window.
 
         Only used for range=all; the zoomed presets keep _expand_run.
         """
@@ -554,10 +563,16 @@ class UsageDB:
             # instant here, which is visually this same single point.
             return [self._expanded_row(run, run["ts_start"])]
 
+        step = _BURN_WINDOW / COLLAPSE_DECAY_POINTS
         points = [start_dt]
         if (end_dt - start_dt) > _BURN_WINDOW:
             for index in range(1, COLLAPSE_DECAY_POINTS + 1):
-                points.append(start_dt + _BURN_WINDOW * (index / COLLAPSE_DECAY_POINTS))
+                points.append(start_dt + step * index)
+            # seriesFor's 'smooth' view averages by index, not by time, so a run's
+            # last point is pulled toward the next run's value. Without a point just
+            # before ts_end, that pull is drawn as a ramp across the whole run.
+            if end_dt - step > points[-1]:
+                points.append(end_dt - step)
         points.append(end_dt)
         return [
             self._expanded_row(run, point.astimezone(timezone.utc).isoformat())

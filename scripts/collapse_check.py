@@ -24,8 +24,8 @@ from db import COLLAPSE_DECAY_POINTS, UsageDB, _parse_iso
 
 T0 = datetime(2026, 7, 16, 10, 0, 0, tzinfo=timezone.utc)
 WINDOW = timedelta(minutes=BURN_WINDOW_MINUTES)
-# ts_start + decay points + ts_end
-LONG_RUN_POINTS = COLLAPSE_DECAY_POINTS + 2
+# ts_start + decay points + trailing mirror point + ts_end
+LONG_RUN_POINTS = COLLAPSE_DECAY_POINTS + 3
 
 # _collapse_run never touches the DB, and UsageDB.__init__ only stores the path.
 DB = UsageDB(pathlib.Path("/nonexistent/never-opened.db"))
@@ -83,6 +83,9 @@ check("ts_end before ts_start -> 1 point", len(rows) == 1)
 rows = DB._collapse_run(make_run(minutes=10, count=5, ts_end="not-a-timestamp"))
 check("unparseable ts_end -> 1 point", len(rows) == 1)
 
+rows = DB._collapse_run(make_run(minutes=10, count=5, ts_start="not-a-timestamp"))
+check("unparseable ts_start -> 1 point", len(rows) == 1)
+
 # A run shorter than the burn window draws as a flat segment: two points.
 rows = DB._collapse_run(make_run(minutes=10, count=10))
 check("short run -> 2 points", len(rows) == 2)
@@ -99,14 +102,32 @@ check(f"long run -> {LONG_RUN_POINTS} points", len(rows) == LONG_RUN_POINTS)
 ts = times(rows)
 check("long run -> starts at ts_start", ts[0] == T0)
 check("long run -> ends at ts_end", ts[-1] == _parse_iso(long_run["ts_end"]))
-check("long run -> last decay point lands on the window edge", ts[-2] == T0 + WINDOW)
+check("long run -> last decay point lands on the window edge", ts[-3] == T0 + WINDOW)
 max_gap = WINDOW.total_seconds() / COLLAPSE_DECAY_POINTS
-gaps = [(b - a).total_seconds() for a, b in zip(ts[:-2], ts[1:-1])]
+gaps = [(b - a).total_seconds() for a, b in zip(ts[:-3], ts[1:-2])]
 check(
     "long run -> no in-window gap exceeds window/COLLAPSE_DECAY_POINTS",
     all(g <= max_gap + 1e-6 for g in gaps),
 )
+# seriesFor's 'smooth' view averages by index, not by time: without a point
+# just before ts_end, the pull toward the next run's value draws as a ramp
+# across the whole remaining run instead of one point spacing.
+check(
+    "long run -> trailing mirror point is within window/COLLAPSE_DECAY_POINTS of ts_end",
+    (ts[-1] - ts[-2]).total_seconds() <= max_gap + 1e-6,
+)
 check("long run -> timestamps strictly increasing", all(a < b for a, b in zip(ts, ts[1:])))
+
+# Just over the window: end_dt - step lands before the window-edge decay point,
+# so the mirror point must be skipped rather than emitted out of order. This is
+# the guard's regression test.
+just_over_run = make_run(minutes=BURN_WINDOW_MINUTES + 1, count=32)
+rows = DB._collapse_run(just_over_run)
+ts = times(rows)
+check(
+    "run just over window -> timestamps strictly increasing",
+    all(a < b for a, b in zip(ts, ts[1:])),
+)
 
 # The RLE property: every point of a run carries that run's values.
 values = [{k: v for k, v in r.items() if k != "ts"} for r in rows]
