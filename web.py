@@ -836,8 +836,8 @@ h2 {
   color: var(--muted);
   font-weight: 500;
 }
-#summary-table th:nth-child(5),
-#summary-table td:nth-child(5) {
+#summary-table th:nth-child(6),
+#summary-table td:nth-child(6) {
   border-left: 1px solid var(--line);
 }
 #summary-table tbody tr:last-child td { border-bottom: none; }
@@ -916,7 +916,7 @@ h2 {
   #summary-table td.cell-hidden {
     display: none;
   }
-  #summary-table td:nth-child(5) {
+  #summary-table td:nth-child(6) {
     border-left: none;
   }
   #summary-table td::before {
@@ -1218,7 +1218,6 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     </div>`;
   }
 
-  // Rows: [metric, usage, burn, reset, alert, expected, overrunAlert, hasExpected]
   const rows = [
     {
       metric: 'Current session',
@@ -1779,13 +1778,16 @@ function computeBurnRate(rows, key, windowMinutes = 30) {
   const windowMs = windowMinutes * 60 * 1000;
   for (let i = 1; i < n; i += 1) {
     if (Number.isNaN(times[i])) continue;
+    const windowStart = times[i] - windowMs;
     let weighted = 0;
     let weight = 0;
     for (let j = i; j >= 1; j -= 1) {
-      if (times[i] - times[j] > windowMs) break;
+      if (times[j] < windowStart) break; // step ends before the trailing window
       if (reset[j]) break; // don't average across a reset boundary
       if (slope[j] == null) continue;
-      const stepMs = times[j] - times[j - 1];
+      // Clip the step to the window so one straddling the boundary contributes
+      // only its in-window duration (e.g. a long step after sleep/pause).
+      const stepMs = times[j] - Math.max(times[j - 1], windowStart);
       if (!(stepMs > 0)) continue;
       weighted += slope[j] * stepMs;
       weight += stepMs;
