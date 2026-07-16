@@ -91,11 +91,12 @@ test('fmtBurn renders missing values as a dash', () => {
   assert.equal(fmtBurn(4.25), '4.3 %/hr');
 });
 
-// db.py's range=all collapse drops a run's interior points and keeps only its
-// endpoints. That is only safe because this function is time-weighted: a step
-// subdivided into N sub-steps carries the same total weight and the same
-// numerator. If that ever stops being true, the collapse silently starts
-// lying and this test is the tripwire.
+// db.py's range=all collapse drops a flat run's interior points, keeping only
+// its endpoints (long runs also keep decay/mirror points for the burn chart,
+// but this run is short enough to skip those). That is only safe because this
+// function is time-weighted: a step subdivided into N sub-steps carries the
+// same total weight and the same numerator. If that ever stops being true,
+// the collapse silently starts lying and this test is the tripwire.
 test('collapsing a flat run to its endpoints does not change the burn rate', () => {
   // A step from 10 to 20 at minute 1, then flat at 20 out to minute 20.
   const flat = [];

@@ -249,13 +249,13 @@ class UsageDB:
             if _normalize_range(range_preset) == "all"
             else self._expand_run
         )
-        expanded_rows: list[dict[str, Any]] = []
+        payload_rows: list[dict[str, Any]] = []
         filtered_samples = 0
         for run in payload_runs:
             filtered_samples += int(run["sample_count"])
-            expanded_rows.extend(to_rows(run))
+            payload_rows.extend(to_rows(run))
         return {
-            "rows": expanded_rows,
+            "rows": payload_rows,
             "total_samples": total_samples,
             "filtered_samples": filtered_samples,
             "run_count": len(payload_runs),

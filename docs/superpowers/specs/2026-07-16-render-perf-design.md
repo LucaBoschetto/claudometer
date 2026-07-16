@@ -41,8 +41,16 @@ correct collapse is simply *the endpoints of each stored run*.
 
 `_expand_run` pins its first point at `ts_start` and its last at `ts_end`
 (db.py), so emitting those two points reproduces the identical polyline:
-same vertices, same slanted connectors between runs. The usage chart is
-therefore **lossless**, not downsampled.
+same vertices, same slanted connectors between runs. This holds for the
+`raw` and `clean` view modes, which draw straight from row values. The usage
+chart is therefore **lossless**, not downsampled, in those two modes.
+
+`smooth` sits between the rows and the chart (`seriesFor` in web.py) and
+averages by array index, not by time, so it is not exactly invariant under
+the collapse: a run's index spacing changes, which shifts how much its last
+point gets pulled toward the next run's value. A mirrored point before
+`ts_end` (see below) bounds that shift to one point spacing, sub-pixel at
+`range=all`, instead of letting it span the whole run.
 
 | | rows | payload |
 |---|---|---|
@@ -193,8 +201,17 @@ Via the serve-only harness on port 7475 against the real DB — never the live
 7474 tracker.
 
 1. Time `renderChart` at `range=all`. Baseline 4,521 ms; expect ~500 ms.
-2. Screenshot the usage chart at `range=all` before/after: must be
-   **pixel-identical**. This is the falsifiable form of the lossless claim.
+2. Screenshot the usage chart at `range=all` before/after, in each of the
+   `raw`/`clean`/`smooth` view modes, naming which mode was captured: `raw`
+   and `clean` must be **pixel-identical** (the falsifiable form of the
+   lossless claim). `smooth` is not covered by the lossless claim: the
+   trailing mirror point bounds the ramp at a long run's *end* to one point
+   spacing, but a short run (`duration <= BURN_WINDOW_MINUTES`) still has only
+   its two endpoints, so both can be pulled toward neighboring runs' values
+   over the run's full duration (up to `BURN_WINDOW_MINUTES`). Measured
+   against the real DB this is visible in a pixel diff (thousands of pixels,
+   not sub-pixel-invisible) — `smooth` is not expected to be pixel-identical
+   before/after, only closer than before the trailing-mirror fix.
 3. `./scripts/run_tests.sh` green.
 
 If (1) disappoints, `scattergl` becomes a follow-up rather than growing this PR.
