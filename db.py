@@ -540,13 +540,17 @@ class UsageDB:
 
         'smooth' is the exception: seriesFor's smoothMoving averages by array
         index, not by time, so collapsing a run changes index spacing and is
-        not exactly invariant there. For long runs, the mirrored point before
-        ts_end (below) bounds that error at the run's end to one point spacing
-        (sub-pixel at range=all) instead of letting it span the whole run.
-        Short runs (duration <= _BURN_WINDOW) still draw with only two points,
-        so both of those can be pulled toward neighboring runs over up to
-        _BURN_WINDOW; 'smooth' is therefore not guaranteed pixel-identical
-        overall, only closer than without this fix.
+        not invariant there. For long runs, the mirrored point before ts_end
+        (below) stops the error at the run's end from spanning the whole run,
+        and measurably helps (21,792 -> 18,115 differing pixels at range=all).
+
+        It does NOT make 'smooth' pixel-identical: ~18,115 of 549,150 pixels
+        (3.3%) still differ, and that residual's cause is UNKNOWN. Do not
+        assume it is short runs keeping only two endpoints -- that was measured
+        and rejected: mirroring every run regardless of duration only reached
+        17,595. Density-driven antialiasing was also rejected, since 'raw' is
+        byte-identical across the same point-count change. Diagnose before
+        changing anything here. See the spec's "Known trade-offs and follow-up".
 
         The burn-rate series is also *not* constant within a run: it decays
         across the burn window after the step into the run, then sits at zero.

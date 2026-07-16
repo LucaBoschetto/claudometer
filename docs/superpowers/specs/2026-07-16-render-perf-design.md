@@ -46,11 +46,27 @@ same vertices, same slanted connectors between runs. This holds for the
 chart is therefore **lossless**, not downsampled, in those two modes.
 
 `smooth` sits between the rows and the chart (`seriesFor` in web.py) and
-averages by array index, not by time, so it is not exactly invariant under
-the collapse: a run's index spacing changes, which shifts how much its last
-point gets pulled toward the next run's value. A mirrored point before
-`ts_end` (see below) bounds that shift to one point spacing, sub-pixel at
-`range=all`, instead of letting it span the whole run.
+averages by array index, not by time, so it is **not** invariant under the
+collapse: a run's index spacing changes, which shifts how much its endpoints
+get pulled toward neighbouring runs' values. A mirrored point before `ts_end`
+(see below) stops a long run's trailing ramp from spanning the whole run, and
+measurably helps (21,792 to 18,115 differing pixels), but does **not**
+eliminate the deviation.
+
+Measured at `range=all`: **18,115 of 549,150 pixels differ (3.3%, max delta
+237)** — visible, not sub-pixel. The residual's root cause is NOT identified.
+Two hypotheses were tested and rejected:
+
+- *Short/medium runs keeping only their two endpoints.* Capping the gap at
+  both edges of every run reached only 17,800, and a diagnostic mirroring
+  every run regardless of duration reached only 17,595. The endpoint pull is
+  therefore not the dominant term.
+- *Vertex-density antialiasing.* `raw` is byte-identical across the same
+  100k-vs-12k point-count difference, so density-driven rasterisation cannot
+  explain it.
+
+This is an accepted trade-off, not a solved problem — see "Known trade-off
+and follow-up".
 
 | | rows | payload |
 |---|---|---|
@@ -200,30 +216,57 @@ something this change would break.
 Via the serve-only harness on port 7475 against the real DB — never the live
 7474 tracker.
 
-1. Time `renderChart` at `range=all`. Baseline 4,521 ms; expect ~500 ms.
-2. Screenshot the usage chart at `range=all` before/after, in each of the
-   `raw`/`clean`/`smooth` view modes, naming which mode was captured: `raw`
-   and `clean` must be **pixel-identical** (the falsifiable form of the
-   lossless claim). `smooth` is not covered by the lossless claim: the
-   trailing mirror point bounds the ramp at a long run's *end* to one point
-   spacing, but a short run (`duration <= BURN_WINDOW_MINUTES`) still has only
-   its two endpoints, so both can be pulled toward neighboring runs' values
-   over the run's full duration (up to `BURN_WINDOW_MINUTES`). Measured
-   against the real DB this is visible in a pixel diff (thousands of pixels,
-   not sub-pixel-invisible) — `smooth` is not expected to be pixel-identical
-   before/after, only closer than before the trailing-mirror fix.
+Both captures must run against a **frozen snapshot** of the DB (SQLite's backup
+API from a read-only connection). The live tracker writes every 60s, so two
+captures taken minutes apart would otherwise render different data and any
+pixel diff would be meaningless.
+
+1. Time `renderChart` at `range=all`. **Measured: 4,986 ms -> 668 ms**
+   (100,870 -> 11,498 rows).
+2. Screenshot the usage chart at `range=all` before/after, naming the view
+   mode captured, with markers and `line.simplify` disabled to isolate
+   geometry:
+   - `raw` and `clean` are **byte-identical** (0 of 549,150 pixels) — the
+     falsifiable form of the lossless claim.
+   - `smooth` is **not** pixel-identical: 18,115 pixels (3.3%). Cause
+     unidentified; see the section above for the hypotheses ruled out.
+   Isolating geometry matters: with defaults on, ~6.6% of pixels differ, of
+   which ~2.5pp is the intended marker thinning and ~4.08pp is Plotly's
+   density-dependent `line.simplify` decimating the *same* path differently
+   at 11k vs 100k points. Neither is data moving.
 3. `./scripts/run_tests.sh` green.
 
 If (1) disappoints, `scattergl` becomes a follow-up rather than growing this PR.
 
-## Known trade-off and follow-up
+## Known trade-offs and follow-up
 
-The burn chart at `range=all` is not pixel-identical: errors up to ~40 %/hr
-exist, sub-pixel (0.04px) at that zoom, visible only under manual zoom. This is
-accepted here and called out in the PR description.
+Two deviations are accepted here, both called out in the PR description.
 
-The root cause is that the usage chart and the burn charts have genuinely
-different resolution needs — the burn series has curvature exactly where the raw
-series is flat. A follow-up PR should rethink this properly, likely by
-decoupling the two charts so the burn charts get their own series rather than
-riding on the usage chart's rows.
+**The burn chart at `range=all` is not pixel-identical**: errors up to ~40 %/hr
+exist, sub-pixel (0.04px) at that zoom, visible only under manual zoom.
+
+**The `smooth` view mode is not pixel-identical**: 18,115 of 549,150 pixels
+(3.3%), which IS visible. `raw` and `clean` — including the default — are
+byte-identical. `smooth` is opt-in and non-default, and the deviation is a
+smoothing artifact rather than wrong underlying data, which is why it is
+accepted rather than blocking. Its root cause is unresolved (see the hypotheses
+ruled out above); it should be diagnosed, not assumed, when the follow-up lands.
+
+**Both share one root cause: derived and transformed series do not survive
+point reduction.** The burn series has curvature exactly where the raw series is
+flat, and `smoothMoving` averages by array index rather than by time, so both
+depend on point *spacing* that the collapse deliberately changes. The raw
+polyline is provably invariant; anything computed from it is not.
+
+A follow-up PR should rethink this properly, likely by decoupling the charts
+from the usage chart's rows so each series gets the resolution it actually
+needs. Making `smoothMoving` time-based rather than index-based is worth
+considering in that work, but it changes the chart's appearance at every range,
+so it is a deliberate decision rather than a drive-by fix.
+
+### Lesson for the next reader
+
+The design reasoned about raw row values reaching Plotly and missed that
+`seriesFor` sits in between. The pixel verification then missed the consequence
+because it only ever ran in the default `raw` mode. **If you change what points
+reach the chart, verify every view mode, not just the default.**
