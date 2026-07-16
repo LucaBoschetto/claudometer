@@ -765,11 +765,14 @@ h2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+  /* Matches .panel-header's horizontal padding so each chart title lines up
+     with the panel heading above it. */
+  padding: 0 20px;
 }
 .burn-chart-title {
   font-size: 13px;
   color: var(--muted);
-  padding: 4px 6px 0 6px;
+  padding: 4px 0 0 0;
 }
 .burn-now {
   color: var(--fg);
@@ -779,7 +782,7 @@ h2 {
 #burn-chart-session,
 #burn-chart-weekly {
   min-height: clamp(160px, 26vh, 260px);
-  padding: 2px 6px 0 6px;
+  padding: 2px 0 0 0;
 }
 .chart-loading {
   position: absolute;
@@ -880,6 +883,7 @@ h2 {
   }
   .burn-charts {
     grid-template-columns: 1fr;
+    padding: 0 16px;
   }
   .chart-loading {
     inset: 62px 0 0 0;
@@ -2132,8 +2136,11 @@ function burnLayout(xaxisLayout) {
     paper_bgcolor: theme.paperBg,
     plot_bgcolor: theme.plotBg,
     font: { color: theme.fg },
-    xaxis: Object.assign({}, xaxisLayout, { title: null }),
-    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid },
+    // These charts are ~half the width of the main one, so the inherited
+    // '%Y-%m-%d %H:%M' ticks rotate steeply and overflow a fixed bottom
+    // margin; automargin reserves whatever the rendered labels actually need.
+    xaxis: Object.assign({}, xaxisLayout, { title: null, automargin: true }),
+    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid, automargin: true },
     margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
     showlegend: false
   };
