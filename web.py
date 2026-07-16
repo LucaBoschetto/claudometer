@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from threading import Thread
 from typing import Any
 
-from config import load_config, write_runtime_env_values
+from config import BURN_WINDOW_MINUTES, load_config, write_runtime_env_values
 from db import UsageDB
 
 
@@ -986,6 +986,8 @@ const yResetEl = document.getElementById('y-reset');
 const themeToggleEl = document.getElementById('theme-toggle');
 
 const expectedLineEnabled = __EXPECTED_LINE_ENABLED__;
+const BURN_WINDOW_MINUTES = __BURN_WINDOW_MINUTES__;
+const RESIZE_DEBOUNCE_MS = 150;
 const expectedActiveStart = '__EXPECTED_ACTIVE_START__';
 const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
 let notifySessionThresholdPct = __NOTIFY_SESSION_THRESHOLD_PCT__;
@@ -1764,7 +1766,7 @@ function maskedSeries(rows, key, predicate) {
 // `values` is the already-view-adjusted series (see seriesFor), not raw row
 // fields: an isolated spike in raw data would otherwise read as a huge slope
 // and then trip the drop check below, blanking the window on its way back down.
-function computeBurnRate(rows, values, windowMinutes = 30) {
+function computeBurnRate(rows, values, windowMinutes = BURN_WINDOW_MINUTES) {
   const n = rows.length;
   const out = new Array(n).fill(null);
   if (n < 2) return out;
@@ -2368,11 +2370,21 @@ async function refreshData() {
 bindControls();
 renderChart([]);
 refreshData();
-window.addEventListener('resize', () => rerenderChartWithLoading(currentRows));
+// Resize fires continuously while dragging, and each re-render is a full
+// Plotly redraw. Coalesce the burst into one render.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (resizeTimer !== null) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    rerenderChartWithLoading(currentRows);
+  }, RESIZE_DEBOUNCE_MS);
+});
 setInterval(refreshData, __POLL_MS__);
 """
     return (
         js.replace("__POLL_MS__", str(poll_ms))
+        .replace("__BURN_WINDOW_MINUTES__", str(BURN_WINDOW_MINUTES))
         .replace("__POLL_INTERVAL_SECONDS__", str(poll_interval_seconds))
         .replace("__EXPECTED_LINE_ENABLED__", "true" if expected_weekly_line_enabled else "false")
         .replace("__EXPECTED_ACTIVE_START__", expected_active_start_hhmm)

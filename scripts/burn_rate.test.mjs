@@ -90,3 +90,32 @@ test('fmtBurn renders missing values as a dash', () => {
   for (const v of [null, undefined, NaN]) assert.equal(fmtBurn(v), '-');
   assert.equal(fmtBurn(4.25), '4.3 %/hr');
 });
+
+// db.py's range=all collapse drops a flat run's interior points, keeping only
+// its endpoints (long runs also keep decay/mirror points for the burn chart,
+// but this run is short enough to skip those). That is only safe because this
+// function is time-weighted: a step subdivided into N sub-steps carries the
+// same total weight and the same numerator. If that ever stops being true,
+// the collapse silently starts lying and this test is the tripwire.
+test('collapsing a flat run to its endpoints does not change the burn rate', () => {
+  // A step from 10 to 20 at minute 1, then flat at 20 out to minute 20.
+  const flat = [];
+  for (let m = 1; m <= 20; m += 1) flat.push([m, 20]);
+  const expanded = rows([[0, 10], ...flat]);
+
+  // What the collapse emits: the step, then only the run's endpoints.
+  const collapsed = rows([[0, 10], [1, 20], [20, 20]]);
+
+  const e = burnOf(expanded);
+  const c = burnOf(collapsed);
+
+  closeTo(c[c.length - 1], e[e.length - 1]);
+});
+
+test('dropping interior points of a flat run preserves the current burn', () => {
+  // currentBurn reads the last aligned point, which is what the Summary table
+  // and the burn charts' headline number show.
+  const dense = rows([[0, 0], [1, 30], [2, 30], [3, 30], [4, 30], [5, 30]]);
+  const sparse = rows([[0, 0], [1, 30], [5, 30]]);
+  closeTo(currentBurn(burnOf(sparse)), currentBurn(burnOf(dense)));
+});

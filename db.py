@@ -7,7 +7,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from config import BURN_WINDOW_MINUTES
 from models import UsageSample
+
+# Interior points emitted across the burn window of a long run. The burn-rate
+# series decays over BURN_WINDOW_MINUTES after the step into a run; without
+# these, a multi-day idle run draws that decay as a multi-day ramp. Four caps
+# every in-window gap at 7.5 minutes, which is ~0.04px at range=all.
+COLLAPSE_DECAY_POINTS = 4
+
+_BURN_WINDOW = timedelta(minutes=BURN_WINDOW_MINUTES)
 
 
 LEGACY_USAGE_LOG_SCHEMA_SQL = """
@@ -57,6 +66,15 @@ LEGACY_USAGE_LOG_EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("extra_used_credits", "REAL"),
     ("extra_monthly_limit", "REAL"),
 )
+
+
+def _normalize_range(range_preset: str) -> str:
+    """Fold unknown presets onto "all".
+
+    Both the SQL window and the expand/collapse choice must agree on this, or a
+    bogus range gets the all-window with per-sample expansion.
+    """
+    return range_preset if range_preset in {"today", "weekly_cycle", "all"} else "all"
 
 
 class UsageDB:
@@ -223,13 +241,21 @@ class UsageDB:
                 ).fetchall()
 
         payload_runs = [self._run_row_to_dict(row) for row in runs]
-        expanded_rows: list[dict[str, Any]] = []
+        # range=all spans the whole history, where per-sample expansion is ~100k
+        # collinear points and ~29 MB of JSON. The zoomed presets are small and
+        # their fidelity is visible, so they keep the full expansion.
+        to_rows = (
+            self._collapse_run
+            if _normalize_range(range_preset) == "all"
+            else self._expand_run
+        )
+        payload_rows: list[dict[str, Any]] = []
         filtered_samples = 0
         for run in payload_runs:
             filtered_samples += int(run["sample_count"])
-            expanded_rows.extend(self._expand_run(run))
+            payload_rows.extend(to_rows(run))
         return {
-            "rows": expanded_rows,
+            "rows": payload_rows,
             "total_samples": total_samples,
             "filtered_samples": filtered_samples,
             "run_count": len(payload_runs),
@@ -238,7 +264,7 @@ class UsageDB:
     def _range_window(
         self, conn: sqlite3.Connection, range_preset: str
     ) -> tuple[str | None, str | None]:
-        normalized = range_preset if range_preset in {"today", "weekly_cycle", "all"} else "all"
+        normalized = _normalize_range(range_preset)
         if normalized == "all":
             return (None, None)
 
@@ -501,6 +527,61 @@ class UsageDB:
                 point_dt = end_dt
             rows.append(self._expanded_row(run, point_dt.astimezone(timezone.utc).isoformat()))
         return rows
+
+    def _collapse_run(self, run: dict[str, Any]) -> list[dict[str, Any]]:
+        """Emit the fewest points that redraw this run.
+
+        usage_runs is run-length encoded: every sample in a run carries the same
+        values, so the run draws as a flat segment and _expand_run's interior
+        points are collinear duplicates sitting on invented evenly-spaced
+        timestamps. Only the endpoints carry shape, and _expand_run pins its
+        first point at ts_start and its last at ts_end, so emitting those two
+        reproduces the identical polyline in the 'raw' and 'clean' view modes.
+
+        'smooth' is the exception: seriesFor's smoothMoving averages by array
+        index, not by time, so collapsing a run changes index spacing and is
+        not invariant there. For long runs, the mirrored point before ts_end
+        (below) stops the error at the run's end from spanning the whole run,
+        and measurably helps (21,792 -> 18,115 differing pixels at range=all).
+
+        It does NOT make 'smooth' pixel-identical: ~18,115 of 549,150 pixels
+        (3.3%) still differ, and that residual's cause is UNKNOWN. Do not
+        assume it is short runs keeping only two endpoints -- that was measured
+        and rejected: mirroring every run regardless of duration only reached
+        17,595. Density-driven antialiasing was also rejected, since 'raw' is
+        byte-identical across the same point-count change. Diagnose before
+        changing anything here. See the spec's "Known trade-offs and follow-up".
+
+        The burn-rate series is also *not* constant within a run: it decays
+        across the burn window after the step into the run, then sits at zero.
+        Endpoints alone would draw that decay as a ramp spanning the whole run,
+        so long runs also get interior points across the window.
+
+        Only used for range=all; the zoomed presets keep _expand_run.
+        """
+        count = max(1, int(run["sample_count"]))
+        start_dt = _parse_iso(run["ts_start"])
+        end_dt = _parse_iso(run["ts_end"])
+        if count == 1 or start_dt is None or end_dt is None or end_dt <= start_dt:
+            # No span to draw. _expand_run emits `count` duplicates at the same
+            # instant here, which is visually this same single point.
+            return [self._expanded_row(run, run["ts_start"])]
+
+        step = _BURN_WINDOW / COLLAPSE_DECAY_POINTS
+        points = [start_dt]
+        if (end_dt - start_dt) > _BURN_WINDOW:
+            for index in range(1, COLLAPSE_DECAY_POINTS + 1):
+                points.append(start_dt + step * index)
+            # seriesFor's 'smooth' view averages by index, not by time, so a run's
+            # last point is pulled toward the next run's value. Without a point just
+            # before ts_end, that pull is drawn as a ramp across the whole run.
+            if end_dt - step > points[-1]:
+                points.append(end_dt - step)
+        points.append(end_dt)
+        return [
+            self._expanded_row(run, point.astimezone(timezone.utc).isoformat())
+            for point in points
+        ]
 
     def _expanded_row(self, run: dict[str, Any], ts: str) -> dict[str, Any]:
         return {
