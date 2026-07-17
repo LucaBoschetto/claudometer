@@ -19,7 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from config import BURN_WINDOW_MINUTES
 
 # Everything computeBurnRate transitively needs, plus the view-mode pipeline it
-# now reads through.
+# now reads through, plus buildResetTraces and the two helpers it leans on.
 FUNCTIONS = [
     "cleanIsolated",
     "smoothMoving",
@@ -27,7 +27,26 @@ FUNCTIONS = [
     "computeBurnRate",
     "currentBurn",
     "fmtBurn",
+    "pad2",
+    "toLocalPlotTs",
+    "buildResetTraces",
 ]
+
+# buildResetTraces walks this, and the order it declares is the trace order the
+# legend persistence indexes into.
+CONSTS = ["RESET_MARKER_SERIES"]
+
+
+def _match_delimiters(src: str, start: int, opener: str, closer: str, name: str) -> str:
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == opener:
+            depth += 1
+        elif src[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return src[:i + 1]
+    sys.exit(f"extract_js: unbalanced {opener}{closer} in {name}")
 
 
 def extract(src: str, name: str) -> str:
@@ -35,15 +54,15 @@ def extract(src: str, name: str) -> str:
     if not match:
         sys.exit(f"extract_js: function not found in web.py: {name}")
     start = src.index("{", match.start())
-    depth = 0
-    for i in range(start, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[match.start() : i + 1]
-    sys.exit(f"extract_js: unbalanced braces in {name}")
+    return _match_delimiters(src, start, "{", "}", name)[match.start():]
+
+
+def extract_const(src: str, name: str) -> str:
+    match = re.search(r"^const %s\s*=\s*\[" % re.escape(name), src, re.M)
+    if not match:
+        sys.exit(f"extract_js: const not found in web.py: {name}")
+    start = src.index("[", match.start())
+    return _match_delimiters(src, start, "[", "]", name)[match.start():] + ";"
 
 
 def main() -> None:
@@ -58,9 +77,14 @@ def main() -> None:
         "// computeBurnRate reads this module-global in web.py, where it is",
         "// templated from config.BURN_WINDOW_MINUTES. Keep them in sync.",
         f"const BURN_WINDOW_MINUTES = {BURN_WINDOW_MINUTES};",
+        "// buildResetTraces reads this module-global in web.py, where it is",
+        "// seeded from localStorage; the tests set it.",
+        "const resetMarkerShown = {};",
+        "export function setResetMarkerShown(key, shown) { resetMarkerShown[key] = shown; }",
     ]
+    parts += [extract_const(src, name) for name in CONSTS]
     parts += [extract(src, name) for name in FUNCTIONS]
-    parts.append("export { %s };" % ", ".join(FUNCTIONS))
+    parts.append("export { %s };" % ", ".join(FUNCTIONS + CONSTS))
     print("\n\n".join(parts))
 
 

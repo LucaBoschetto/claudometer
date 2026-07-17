@@ -999,7 +999,7 @@ let notifyExpectedSonnetOverrunEnabled = __NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLE
 let notifyExpectedSessionOverrunEnabled = __NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__;
 
 let hasInitializedXRange = false;
-let hasBoundRelayout = false;
+let hasBoundChartEvents = false;
 let userXRange = null;
 let currentTotalSamples = 0;
 let alertSettingsDirty = false;
@@ -1511,31 +1511,82 @@ function maybeNotifyExpectedSonnetOverrun(state, latest, expectedNowPct) {
   state.expectedSonnetOverrun = entry;
 }
 
-function buildShapes(rows) {
-  const shapes = [];
-  const seen = new Set();
-  rows.forEach((row) => {
-    ['session_resets', 'weekly_resets'].forEach((key) => {
-      const value = row[key];
+// Reset markers are traces rather than layout shapes so the legend can hide
+// them — Plotly's legend only ever enumerates traces. They stay at a fixed
+// position in the traces array (see buildResetTraces).
+const RESET_MARKER_SERIES = [
+  {
+    key: 'session_resets',
+    name: 'Session resets',
+    color: 'rgba(0,120,212,0.45)',
+    legendrank: 60,
+    storageKey: 'tracker_show_session_resets'
+  },
+  {
+    key: 'weekly_resets',
+    name: 'Weekly resets',
+    color: 'rgba(227,89,0,0.45)',
+    legendrank: 70,
+    storageKey: 'tracker_show_weekly_resets'
+  }
+];
+
+const resetMarkerShown = {};
+RESET_MARKER_SERIES.forEach((series) => {
+  resetMarkerShown[series.key] = storageGet(series.storageKey, 'true') !== 'false';
+});
+
+// Always returns one trace per kind, in a stable order, even when a range holds
+// no resets of that kind. Plotly matches old traces to new ones by index when
+// it restores legend toggles under uirevision, so a trace that came and went
+// would hand its remembered visibility to whichever trace took its slot.
+function buildResetTraces(rows) {
+  return RESET_MARKER_SERIES.map((series) => {
+    const seen = new Set();
+    const x = [];
+    const y = [];
+    rows.forEach((row) => {
+      const value = row[series.key];
       if (!value) return;
       const localValue = toLocalPlotTs(value);
-      if (!localValue || seen.has(key + localValue)) return;
-      seen.add(key + localValue);
-      shapes.push({
-        type: 'line',
-        x0: localValue,
-        x1: localValue,
-        y0: 0,
-        y1: 100,
-        line: {
-          color: key === 'session_resets' ? 'rgba(0,120,212,0.45)' : 'rgba(227,89,0,0.45)',
-          width: 1,
-          dash: 'dot'
-        }
-      });
+      if (!localValue || seen.has(localValue)) return;
+      seen.add(localValue);
+      // null breaks the line, so each reset draws as its own vertical segment
+      // instead of chaining into the next one.
+      x.push(localValue, localValue, null);
+      y.push(0, 100, null);
     });
+    return {
+      x,
+      y,
+      mode: 'lines',
+      name: series.name,
+      line: { color: series.color, width: 1, dash: 'dot' },
+      legendrank: series.legendrank,
+      visible: resetMarkerShown[series.key] ? true : 'legendonly',
+      hoverinfo: 'skip'
+    };
   });
-  return shapes;
+}
+
+// Legend toggles already survive refreshes via uirevision; this is what carries
+// them across a page reload.
+//
+// Read the state back off the chart rather than deriving it from the click:
+// uirevision only defends a user's toggle while the visible we supply stays put,
+// so the moment our idea of the state diverges from the chart's, the next
+// refresh overrides the user. Observing both traces after Plotly settles keeps
+// the two in step no matter how the state got there — a click, a double-click
+// (which fires legendclick twice, pre-toggle, before isolating), or an isolate
+// triggered from some other entry in the legend.
+function syncResetMarkerVisibility() {
+  RESET_MARKER_SERIES.forEach((series, index) => {
+    const trace = chartEl.data && chartEl.data[index];
+    if (!trace || trace.name !== series.name) return;
+    const shown = trace.visible !== 'legendonly';
+    resetMarkerShown[series.key] = shown;
+    storageSet(series.storageKey, shown ? 'true' : 'false');
+  });
 }
 
 function hhmmToMinutes(hhmm) {
@@ -1917,9 +1968,14 @@ function syncBurnChartsXRange(range) {
   });
 }
 
-function ensureRelayoutBinding() {
-  if (hasBoundRelayout) return;
+function ensureChartBindings() {
+  if (hasBoundChartEvents) return;
   if (typeof chartEl.on !== 'function') return;
+  // restyle rather than the legend click events: those fire before the toggle
+  // they describe is applied, and a single click doesn't apply until Plotly has
+  // waited out its double-click delay. restyle is emitted once the change has
+  // actually landed, whatever the gesture behind it.
+  chartEl.on('plotly_restyle', syncResetMarkerVisibility);
   chartEl.on('plotly_relayout', (evt) => {
     if (!evt) return;
     if (evt['xaxis.range[0]'] && evt['xaxis.range[1]']) {
@@ -1934,7 +1990,7 @@ function ensureRelayoutBinding() {
       syncBurnChartsXRange(null);
     }
   });
-  hasBoundRelayout = true;
+  hasBoundChartEvents = true;
 }
 
 function bindControls() {
@@ -2190,7 +2246,11 @@ function renderChart(rows) {
   rangePresetEl.value = activeRangePreset;
 
   if (!rows.length) {
-    Plotly.newPlot(chartEl, [], {
+    // react, not newPlot: newPlot purges the div, and purging drops every
+    // handler ensureChartBindings installed — which its own guard then refuses
+    // to reinstall. An empty DB would otherwise cost us the legend and zoom
+    // handlers for the rest of the session, even once samples start arriving.
+    Plotly.react(chartEl, [], {
       title: null,
       uirevision: 'keep-zoom',
       paper_bgcolor: theme.paperBg,
@@ -2200,7 +2260,7 @@ function renderChart(rows) {
       yaxis: { title: compact ? null : 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
       margin: compact ? { t: 20, r: 18, b: 48, l: 42 } : { t: 24, r: 30, b: 72, l: 60 }
     }, { responsive: true });
-    ensureRelayoutBinding();
+    ensureChartBindings();
     renderSummaryTable(null, null, null, null, null, null);
     renderBurnCharts([], [], [], null);
     setChartLoading(false);
@@ -2213,7 +2273,11 @@ function renderChart(rows) {
   // same view mode.
   const sessionValues = seriesFor(rows, 'session_pct');
   const weeklyValues = seriesFor(rows, 'weekly_pct');
+  // The reset traces lead the array so their indices stay put as the optional
+  // Sonnet/expected traces come and go; legendrank still sinks them to the end
+  // of the legend.
   const traces = [
+    ...buildResetTraces(rows),
     {
       x,
       y: maskedSeries(rows, 'extra_pct', (row) => row.extra_enabled !== false),
@@ -2333,7 +2397,6 @@ function renderChart(rows) {
     font: { color: theme.fg },
     xaxis: xaxisLayout,
     yaxis: { title: compact ? null : 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
-    shapes: buildShapes(rows),
     margin: compact ? { t: 20, r: 18, b: 88, l: 42 } : { t: 28, r: 30, b: 100, l: 60 },
     legend: compact
       ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 }, traceorder: 'normal' }
@@ -2342,7 +2405,7 @@ function renderChart(rows) {
 
   renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout);
 
-  ensureRelayoutBinding();
+  ensureChartBindings();
   hasInitializedXRange = true;
   hasLoadedInitialData = true;
   setChartLoading(false);
