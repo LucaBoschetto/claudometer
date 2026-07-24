@@ -44,7 +44,8 @@ def make_run(minutes: float, count: int, **overrides) -> dict:
         "extra_enabled": False,
         "extra_used_credits": 0.0,
         "extra_monthly_limit": 1000.0,
-        "sonnet_pct": None,
+        "scoped_pct": None,
+        "scoped_model": None,
     }
     run.update(overrides)
     return run
@@ -140,7 +141,7 @@ print("fetch_chart_data:")
 RUN_COLUMNS = (
     "ts_start", "ts_end", "sample_count", "session_pct", "session_resets",
     "weekly_pct", "weekly_resets", "extra_pct", "extra_enabled",
-    "extra_used_credits", "extra_monthly_limit", "sonnet_pct",
+    "extra_used_credits", "extra_monthly_limit", "scoped_pct", "scoped_model",
 )
 
 with tempfile.TemporaryDirectory() as tmp:

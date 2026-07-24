@@ -89,14 +89,31 @@ class UsageAPIClient:
         return headers
 
 
+def _find_scoped_weekly(limits: Any) -> dict[str, Any] | None:
+    """The per-model weekly cap, identified by kind + a present scope.model.
+
+    limits[] also holds the unscoped session/weekly_all entries, so match on
+    kind rather than position.
+    """
+    if not isinstance(limits, list):
+        return None
+    for entry in limits:
+        if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+            continue
+        model = (entry.get("scope") or {}).get("model") or {}
+        if model:
+            return {"percent": entry.get("percent"), "model": model.get("display_name")}
+    return None
+
+
 def parse_payload(
     payload: dict[str, Any], ts_iso: str, overage_payload: dict[str, Any] | None = None
 ) -> UsageSample:
     five_hour = payload.get("five_hour") or {}
     seven_day = payload.get("seven_day") or {}
-    seven_day_sonnet = payload.get("seven_day_sonnet") or {}
     extra_usage = payload.get("extra_usage") or {}
     overage = overage_payload or {}
+    scoped = _find_scoped_weekly(payload.get("limits"))
 
     extra_util = _normalize_usage_api_pct(extra_usage.get("utilization"))
     extra_enabled = _normalize_optional_bool(extra_usage.get("is_enabled"))
@@ -127,7 +144,8 @@ def parse_payload(
         extra_enabled=extra_enabled,
         extra_used_credits=extra_used_credits,
         extra_monthly_limit=extra_monthly_limit,
-        sonnet_pct=_normalize_usage_api_pct(seven_day_sonnet.get("utilization")) if seven_day_sonnet else None,
+        scoped_pct=_normalize_usage_api_pct(scoped["percent"]) if scoped else None,
+        scoped_model=scoped["model"] if scoped else None,
     )
 
 

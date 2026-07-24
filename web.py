@@ -109,9 +109,9 @@ def start_dashboard_server(
     notify_session_threshold_pct: float | None,
     notify_weekly_threshold_pct: float | None,
     notify_extra_threshold_pct: float | None,
-    notify_sonnet_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
-    notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
     notify_expected_session_overrun_enabled: bool,
 ) -> ThreadingHTTPServer:
     handler_cls = _build_handler(
@@ -123,9 +123,9 @@ def start_dashboard_server(
         notify_session_threshold_pct,
         notify_weekly_threshold_pct,
         notify_extra_threshold_pct,
-        notify_sonnet_threshold_pct,
+        notify_scoped_threshold_pct,
         notify_expected_weekly_overrun_enabled,
-        notify_expected_sonnet_overrun_enabled,
+        notify_expected_scoped_overrun_enabled,
         notify_expected_session_overrun_enabled,
     )
     server = ReusableThreadingHTTPServer((host, port), handler_cls)
@@ -146,9 +146,9 @@ def _build_handler(
     notify_session_threshold_pct: float | None,
     notify_weekly_threshold_pct: float | None,
     notify_extra_threshold_pct: float | None,
-    notify_sonnet_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
-    notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
     notify_expected_session_overrun_enabled: bool,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
@@ -170,9 +170,9 @@ def _build_handler(
                         notify_session_threshold_pct,
                         notify_weekly_threshold_pct,
                         notify_extra_threshold_pct,
-                        notify_sonnet_threshold_pct,
+                        notify_scoped_threshold_pct,
                         notify_expected_weekly_overrun_enabled,
-                        notify_expected_sonnet_overrun_enabled,
+                        notify_expected_scoped_overrun_enabled,
                         notify_expected_session_overrun_enabled,
                     )
                 )
@@ -196,9 +196,9 @@ def _build_handler(
                     "session_threshold_pct": current_config.notify_session_threshold_pct,
                     "weekly_threshold_pct": current_config.notify_weekly_threshold_pct,
                     "extra_threshold_pct": current_config.notify_extra_threshold_pct,
-                    "sonnet_threshold_pct": current_config.notify_sonnet_threshold_pct,
+                    "scoped_threshold_pct": current_config.notify_scoped_threshold_pct,
                     "expected_weekly_overrun_enabled": current_config.notify_expected_weekly_overrun_enabled,
-                    "expected_sonnet_overrun_enabled": current_config.notify_expected_sonnet_overrun_enabled,
+                    "expected_scoped_overrun_enabled": current_config.notify_expected_scoped_overrun_enabled,
                     "expected_session_overrun_enabled": current_config.notify_expected_session_overrun_enabled,
                 }
                 self._respond_json(payload)
@@ -225,13 +225,13 @@ def _build_handler(
                     if expected_weekly_line_enabled
                     else None
                 )
-                expected_sonnet = (
+                expected_scoped = (
                     _expected_weekly_pct(
                         weekly_resets,
                         expected_active_start_hhmm,
                         expected_active_end_hhmm,
                     )
-                    if expected_weekly_line_enabled and last.get("sonnet_pct") is not None
+                    if expected_weekly_line_enabled and last.get("scoped_pct") is not None
                     else None
                 )
                 payload = {
@@ -239,12 +239,13 @@ def _build_handler(
                     "current": {
                         "session_pct": last.get("session_pct"),
                         "weekly_pct": last.get("weekly_pct"),
-                        "sonnet_pct": last.get("sonnet_pct"),
+                        "scoped_pct": last.get("scoped_pct"),
+                        "scoped_model": last.get("scoped_model"),
                     },
                     "expected": {
                         "session_pct": round(expected_session, 2) if expected_session is not None else None,
                         "weekly_pct": round(expected_weekly, 2) if expected_weekly is not None else None,
-                        "sonnet_pct": round(expected_sonnet, 2) if expected_sonnet is not None else None,
+                        "scoped_pct": round(expected_scoped, 2) if expected_scoped is not None else None,
                     },
                     "resets": {
                         "session": session_resets,
@@ -269,12 +270,12 @@ def _build_handler(
                         "NOTIFY_SESSION_THRESHOLD_PCT": normalized["session_threshold_pct"],
                         "NOTIFY_WEEKLY_THRESHOLD_PCT": normalized["weekly_threshold_pct"],
                         "NOTIFY_EXTRA_THRESHOLD_PCT": normalized["extra_threshold_pct"],
-                        "NOTIFY_SONNET_THRESHOLD_PCT": normalized["sonnet_threshold_pct"],
+                        "NOTIFY_SCOPED_THRESHOLD_PCT": normalized["scoped_threshold_pct"],
                         "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": normalized[
                             "expected_weekly_overrun_enabled"
                         ],
-                        "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED": normalized[
-                            "expected_sonnet_overrun_enabled"
+                        "NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED": normalized[
+                            "expected_scoped_overrun_enabled"
                         ],
                         "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED": normalized[
                             "expected_session_overrun_enabled"
@@ -295,12 +296,12 @@ def _build_handler(
                         "session_threshold_pct": _as_number_or_none(normalized["session_threshold_pct"]),
                         "weekly_threshold_pct": _as_number_or_none(normalized["weekly_threshold_pct"]),
                         "extra_threshold_pct": _as_number_or_none(normalized["extra_threshold_pct"]),
-                        "sonnet_threshold_pct": _as_number_or_none(normalized["sonnet_threshold_pct"]),
+                        "scoped_threshold_pct": _as_number_or_none(normalized["scoped_threshold_pct"]),
                         "expected_weekly_overrun_enabled": normalized[
                             "expected_weekly_overrun_enabled"
                         ] == "true",
-                        "expected_sonnet_overrun_enabled": normalized[
-                            "expected_sonnet_overrun_enabled"
+                        "expected_scoped_overrun_enabled": normalized[
+                            "expected_scoped_overrun_enabled"
                         ] == "true",
                         "expected_session_overrun_enabled": normalized[
                             "expected_session_overrun_enabled"
@@ -396,14 +397,14 @@ def _normalize_notification_settings(payload: dict[str, Any]) -> dict[str, str]:
         "extra_threshold_pct": _normalize_threshold_value(
             payload.get("extra_threshold_pct"), "Extra usage threshold"
         ),
-        "sonnet_threshold_pct": _normalize_threshold_value(
-            payload.get("sonnet_threshold_pct"), "Sonnet threshold"
+        "scoped_threshold_pct": _normalize_threshold_value(
+            payload.get("scoped_threshold_pct"), "Scoped threshold"
         ),
         "expected_weekly_overrun_enabled": "true"
         if bool(payload.get("expected_weekly_overrun_enabled"))
         else "false",
-        "expected_sonnet_overrun_enabled": "true"
-        if bool(payload.get("expected_sonnet_overrun_enabled"))
+        "expected_scoped_overrun_enabled": "true"
+        if bool(payload.get("expected_scoped_overrun_enabled"))
         else "false",
         "expected_session_overrun_enabled": "true"
         if bool(payload.get("expected_session_overrun_enabled"))
@@ -960,9 +961,9 @@ def _app_js(
     notify_session_threshold_pct: float | None,
     notify_weekly_threshold_pct: float | None,
     notify_extra_threshold_pct: float | None,
-    notify_sonnet_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
-    notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
     notify_expected_session_overrun_enabled: bool,
 ) -> str:
     poll_ms = poll_interval_seconds * 1000
@@ -993,9 +994,9 @@ const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
 let notifySessionThresholdPct = __NOTIFY_SESSION_THRESHOLD_PCT__;
 let notifyWeeklyThresholdPct = __NOTIFY_WEEKLY_THRESHOLD_PCT__;
 let notifyExtraThresholdPct = __NOTIFY_EXTRA_THRESHOLD_PCT__;
-let notifySonnetThresholdPct = __NOTIFY_SONNET_THRESHOLD_PCT__;
+let notifyScopedThresholdPct = __NOTIFY_SCOPED_THRESHOLD_PCT__;
 let notifyExpectedWeeklyOverrunEnabled = __NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__;
-let notifyExpectedSonnetOverrunEnabled = __NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED__;
+let notifyExpectedScopedOverrunEnabled = __NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED__;
 let notifyExpectedSessionOverrunEnabled = __NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__;
 
 let hasInitializedXRange = false;
@@ -1044,9 +1045,9 @@ let alertSettingsDraft = {
   session_threshold_pct: notifySessionThresholdPct,
   weekly_threshold_pct: notifyWeeklyThresholdPct,
   extra_threshold_pct: notifyExtraThresholdPct,
-  sonnet_threshold_pct: notifySonnetThresholdPct,
+  scoped_threshold_pct: notifyScopedThresholdPct,
   expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
-  expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled,
+  expected_scoped_overrun_enabled: notifyExpectedScopedOverrunEnabled,
   expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
 };
 
@@ -1155,9 +1156,9 @@ function syncAlertSettingsDraftFromRuntime() {
     session_threshold_pct: notifySessionThresholdPct,
     weekly_threshold_pct: notifyWeeklyThresholdPct,
     extra_threshold_pct: notifyExtraThresholdPct,
-    sonnet_threshold_pct: notifySonnetThresholdPct,
+    scoped_threshold_pct: notifyScopedThresholdPct,
     expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
-    expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled,
+    expected_scoped_overrun_enabled: notifyExpectedScopedOverrunEnabled,
     expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
   };
 }
@@ -1172,9 +1173,9 @@ function normalizedAlertSettingsSnapshot(settings) {
     session_threshold_pct: normalizeThreshold(settings.session_threshold_pct),
     weekly_threshold_pct: normalizeThreshold(settings.weekly_threshold_pct),
     extra_threshold_pct: normalizeThreshold(settings.extra_threshold_pct),
-    sonnet_threshold_pct: normalizeThreshold(settings.sonnet_threshold_pct),
+    scoped_threshold_pct: normalizeThreshold(settings.scoped_threshold_pct),
     expected_weekly_overrun_enabled: !!settings.expected_weekly_overrun_enabled,
-    expected_sonnet_overrun_enabled: !!settings.expected_sonnet_overrun_enabled,
+    expected_scoped_overrun_enabled: !!settings.expected_scoped_overrun_enabled,
     expected_session_overrun_enabled: !!settings.expected_session_overrun_enabled
   });
 }
@@ -1184,9 +1185,9 @@ function refreshSaveAlertButton() {
     session_threshold_pct: notifySessionThresholdPct,
     weekly_threshold_pct: notifyWeeklyThresholdPct,
     extra_threshold_pct: notifyExtraThresholdPct,
-    sonnet_threshold_pct: notifySonnetThresholdPct,
+    scoped_threshold_pct: notifyScopedThresholdPct,
     expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
-    expected_sonnet_overrun_enabled: notifyExpectedSonnetOverrunEnabled,
+    expected_scoped_overrun_enabled: notifyExpectedScopedOverrunEnabled,
     expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
   };
   alertSettingsDirty =
@@ -1205,7 +1206,19 @@ function fmtPct(v) {
   return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + '%';
 }
 
-function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct, sessionBurnNow, weeklyBurnNow) {
+// The summary table is built as an innerHTML string, so any value that isn't a
+// hardcoded constant has to be escaped. row.metric is the only dynamic text
+// field: the scoped row's label comes from the API's scope.model.display_name.
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedScopedNowPct, sessionBurnNow, weeklyBurnNow) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
   const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
 
@@ -1252,17 +1265,18 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
     },
   ];
 
-  // Sonnet-only row: only show when data is present, before Extra usage
-  if (latest && latest.sonnet_pct !== null && latest.sonnet_pct !== undefined) {
+  // Model-scoped row: only show when data is present, before Extra usage.
+  if (latest && latest.scoped_pct !== null && latest.scoped_pct !== undefined) {
+    const scopedLabel = latest.scoped_model || 'Scoped';
     rows.push({
-      metric: 'Sonnet only',
-      usage: fmtPct(latest.sonnet_pct),
+      metric: `${scopedLabel} only`,
+      usage: fmtPct(latest.scoped_pct),
       reset: fmtReset(latest.weekly_resets),
-      alert: makeThresholdAlert('sonnet_threshold_pct', alertSettingsDraft.sonnet_threshold_pct),
-      expected: fmtPct(expectedSonnetNowPct),
-      rawExpected: expectedSonnetNowPct ?? null,
-      rawUsage: latest.sonnet_pct ?? null,
-      overrunAlert: makeOverrunAlert('expected_sonnet_overrun_enabled', alertSettingsDraft.expected_sonnet_overrun_enabled)
+      alert: makeThresholdAlert('scoped_threshold_pct', alertSettingsDraft.scoped_threshold_pct),
+      expected: fmtPct(expectedScopedNowPct),
+      rawExpected: expectedScopedNowPct ?? null,
+      rawUsage: latest.scoped_pct ?? null,
+      overrunAlert: makeOverrunAlert('expected_scoped_overrun_enabled', alertSettingsDraft.expected_scoped_overrun_enabled)
     });
   }
 
@@ -1281,7 +1295,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       const expectedOverrun = hasExpected && row.rawExpected !== null && row.rawUsage !== null && row.rawUsage > row.rawExpected;
       const expectedStyle = expectedOverrun ? ' style="color: var(--accent-2)"' : '';
       return `<tr>
-        <td data-cell="metric">${row.metric}</td>
+        <td data-cell="metric">${escapeHtml(row.metric)}</td>
         <td data-label="Usage">${row.usage}</td>
         <td data-label="Burn rate">${fmtBurn(row.burn)}</td>
         <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
@@ -1322,18 +1336,18 @@ function latestExpectedNowPct(rows) {
 function evaluateThresholdNotificationsNow() {
   if (!currentRows.length) return;
   const latest = currentRows[currentRows.length - 1];
-  const hasSonnet = currentRows.some((r) => r.sonnet_pct !== null && r.sonnet_pct !== undefined);
-  const sonnetExpected = hasSonnet ? computeExpectedSonnetTrace(currentRows) : null;
+  const hasScoped = currentRows.some((r) => r.scoped_pct !== null && r.scoped_pct !== undefined);
+  const scopedExpected = hasScoped ? computeExpectedScopedTrace(currentRows) : null;
   const sessionExpected = computeExpectedSessionTrace(currentRows);
   maybeNotifyThresholds(
     latest,
     sessionExpected ? sessionExpected.expectedNowPct : null,
     latestExpectedNowPct(currentRows),
-    sonnetExpected ? sonnetExpected.expectedNowPct : null
+    scopedExpected ? scopedExpected.expectedNowPct : null
   );
 }
 
-function maybeNotifyThresholds(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedSonnetNowPct) {
+function maybeNotifyThresholds(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedScopedNowPct) {
   if (!latest || !notificationsSupported() || Notification.permission !== 'granted' || !alertsEnabled) return;
 
   const state = notificationState();
@@ -1369,17 +1383,18 @@ function maybeNotifyThresholds(latest, expectedSessionNowPct, expectedWeeklyNowP
     `Extra usage reached ${fmtPct(latest.extra_pct)}.`
   );
 
-  if (latest.sonnet_pct !== null && latest.sonnet_pct !== undefined) {
+  if (latest.scoped_pct !== null && latest.scoped_pct !== undefined) {
+    const scopedLabel = latest.scoped_model || 'Scoped';
     maybeNotifyThresholdCrossing(
       state,
-      'sonnet',
-      latest.sonnet_pct,
-      notifySonnetThresholdPct,
+      'scoped',
+      latest.scoped_pct,
+      notifyScopedThresholdPct,
       latest.weekly_resets || 'unknown',
-      'Claudometer: Sonnet usage alert',
-      `Sonnet-only usage reached ${fmtPct(latest.sonnet_pct)}.`
+      `Claudometer: ${scopedLabel} usage alert`,
+      `${scopedLabel}-only usage reached ${fmtPct(latest.scoped_pct)}.`
     );
-    maybeNotifyExpectedSonnetOverrun(state, latest, expectedSonnetNowPct);
+    maybeNotifyExpectedScopedOverrun(state, latest, expectedScopedNowPct);
   }
 
   maybeNotifyExpectedOverrun(state, latest, expectedWeeklyNowPct);
@@ -1477,30 +1492,31 @@ function maybeNotifyExpectedSessionOverrun(state, latest, expectedNowPct) {
   state.expectedSessionOverrun = entry;
 }
 
-function maybeNotifyExpectedSonnetOverrun(state, latest, expectedNowPct) {
+function maybeNotifyExpectedScopedOverrun(state, latest, expectedNowPct) {
   if (
-    !notifyExpectedSonnetOverrunEnabled ||
-    latest.sonnet_pct === null ||
-    latest.sonnet_pct === undefined ||
+    !notifyExpectedScopedOverrunEnabled ||
+    latest.scoped_pct === null ||
+    latest.scoped_pct === undefined ||
     expectedNowPct === null ||
     expectedNowPct === undefined
   ) {
     return;
   }
 
+  const scopedLabel = latest.scoped_model || 'Scoped';
   const entryKey = latest.weekly_resets || 'unknown';
-  const entry = state.expectedSonnetOverrun || {};
+  const entry = state.expectedScopedOverrun || {};
   if (entry.key !== entryKey) {
     entry.key = entryKey;
     entry.alerted = false;
   }
 
-  if (latest.sonnet_pct > expectedNowPct) {
+  if (latest.scoped_pct > expectedNowPct) {
     if (!entry.alerted) {
       showNotification(
-        'Claudometer: Sonnet usage above expected',
-        `Sonnet-only usage is ${fmtPct(latest.sonnet_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
-        `expected-sonnet-overrun:${entryKey}`
+        `Claudometer: ${scopedLabel} usage above expected`,
+        `${scopedLabel}-only usage is ${fmtPct(latest.scoped_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
+        `expected-scoped-overrun:${entryKey}`
       );
       entry.alerted = true;
     }
@@ -1508,7 +1524,7 @@ function maybeNotifyExpectedSonnetOverrun(state, latest, expectedNowPct) {
     entry.alerted = false;
   }
 
-  state.expectedSonnetOverrun = entry;
+  state.expectedScopedOverrun = entry;
 }
 
 // Reset markers are traces rather than layout shapes so the legend can hide
@@ -1709,12 +1725,22 @@ function computeExpectedWeeklyTrace(rows) {
   };
 }
 
-// Sonnet expected line: uses the same active-hours settings and weekly_resets cycle
-// (Sonnet resets at the same time as weekly usage).
-function computeExpectedSonnetTrace(rows) {
+// The visible label for the model-scoped series. The API scopes the weekly cap
+// to one model at a time (Sonnet historically, Fable now) and names it per row;
+// use the most recent non-null name, falling back to a neutral word.
+function resolveScopedModel(rows) {
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i] && rows[i].scoped_model) return rows[i].scoped_model;
+  }
+  return 'Scoped';
+}
+
+// Scoped-model expected line: same active-hours settings and weekly_resets cycle
+// (the scoped cap resets with weekly usage). Computed for the table/notifications
+// only; not added as a chart trace.
+function computeExpectedScopedTrace(rows) {
   if (!expectedLineEnabled || rows.length < 1) return null;
-  // Only compute when Sonnet data is actually present
-  if (!rows.some((r) => r.sonnet_pct !== null && r.sonnet_pct !== undefined)) return null;
+  if (!rows.some((r) => r.scoped_pct !== null && r.scoped_pct !== undefined)) return null;
 
   const startMin = hhmmToMinutes(expectedActiveStart);
   const endMin = hhmmToMinutes(expectedActiveEnd);
@@ -1759,9 +1785,9 @@ function computeExpectedSonnetTrace(rows) {
       x,
       y,
       mode: 'lines',
-      name: 'Expected Sonnet usage',
+      name: 'Expected scoped usage',
       line: { color: 'rgba(192,132,252,0.65)', width: 2.0, dash: '3px,3px' },
-      hovertemplate: 'Expected Sonnet: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected Sonnet usage</extra>'
+      hovertemplate: 'Expected scoped: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected scoped usage</extra>'
     },
     expectedNowPct: nowPct
   };
@@ -2133,9 +2159,9 @@ async function saveAlertSettings() {
       session_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.session_threshold_pct),
       weekly_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.weekly_threshold_pct),
       extra_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.extra_threshold_pct),
-      sonnet_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.sonnet_threshold_pct),
+      scoped_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.scoped_threshold_pct),
       expected_weekly_overrun_enabled: !!alertSettingsDraft.expected_weekly_overrun_enabled,
-      expected_sonnet_overrun_enabled: !!alertSettingsDraft.expected_sonnet_overrun_enabled,
+      expected_scoped_overrun_enabled: !!alertSettingsDraft.expected_scoped_overrun_enabled,
       expected_session_overrun_enabled: !!alertSettingsDraft.expected_session_overrun_enabled
     };
     const res = await fetch('/notification-settings', {
@@ -2168,9 +2194,9 @@ function applyNotificationSettings(settings, fromSave = false) {
   notifySessionThresholdPct = settings.session_threshold_pct ?? null;
   notifyWeeklyThresholdPct = settings.weekly_threshold_pct ?? null;
   notifyExtraThresholdPct = settings.extra_threshold_pct ?? null;
-  notifySonnetThresholdPct = settings.sonnet_threshold_pct ?? null;
+  notifyScopedThresholdPct = settings.scoped_threshold_pct ?? null;
   notifyExpectedWeeklyOverrunEnabled = !!settings.expected_weekly_overrun_enabled;
-  notifyExpectedSonnetOverrunEnabled = !!settings.expected_sonnet_overrun_enabled;
+  notifyExpectedScopedOverrunEnabled = !!settings.expected_scoped_overrun_enabled;
   notifyExpectedSessionOverrunEnabled = !!settings.expected_session_overrun_enabled;
   if (!alertSettingsDirty || fromSave) {
     syncAlertSettingsDraftFromRuntime();
@@ -2268,13 +2294,13 @@ function renderChart(rows) {
   }
 
   const x = rows.map((r) => toLocalPlotTs(r.ts));
-  const hasSonnet = rows.some((r) => r.sonnet_pct !== null && r.sonnet_pct !== undefined);
+  const hasScoped = rows.some((r) => r.scoped_pct !== null && r.scoped_pct !== undefined);
   // Shared by the usage traces and the burn-rate charts, so both reflect the
   // same view mode.
   const sessionValues = seriesFor(rows, 'session_pct');
   const weeklyValues = seriesFor(rows, 'weekly_pct');
   // The reset traces lead the array so their indices stay put as the optional
-  // Sonnet/expected traces come and go; legendrank still sinks them to the end
+  // Scoped/expected traces come and go; legendrank still sinks them to the end
   // of the legend.
   const traces = [
     ...buildResetTraces(rows),
@@ -2320,12 +2346,12 @@ function renderChart(rows) {
     }
   ];
 
-  if (hasSonnet) {
+  if (hasScoped) {
     traces.push({
       x,
-      y: seriesFor(rows, 'sonnet_pct'),
+      y: seriesFor(rows, 'scoped_pct'),
       mode: 'lines+markers',
-      name: 'Sonnet only',
+      name: `${resolveScopedModel(rows)} only`,
       line: { color: '#c084fc', width: lineWidth },
       marker: { size: markerSize },
       legendrank: 25,
@@ -2339,9 +2365,9 @@ function renderChart(rows) {
     traces.push(expectedData.trace);
   }
 
-  // Sonnet expected line is identical to the weekly expected line, so we only
+  // Scoped expected line is identical to the weekly expected line, so we only
   // compute it for the table/notifications — no separate chart trace needed.
-  const expectedSonnetData = hasSonnet ? computeExpectedSonnetTrace(rows) : null;
+  const expectedScopedData = hasScoped ? computeExpectedScopedTrace(rows) : null;
 
   const expectedSessionData = computeExpectedSessionTrace(rows);
   if (expectedSessionData) {
@@ -2360,7 +2386,7 @@ function renderChart(rows) {
     latest,
     expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
-    expectedSonnetData ? expectedSonnetData.expectedNowPct : null,
+    expectedScopedData ? expectedScopedData.expectedNowPct : null,
     currentBurn(sessionBurnSeries),
     currentBurn(weeklyBurnSeries)
   );
@@ -2368,7 +2394,7 @@ function renderChart(rows) {
     latest,
     expectedSessionData ? expectedSessionData.expectedNowPct : null,
     expectedData ? expectedData.expectedNowPct : null,
-    expectedSonnetData ? expectedSonnetData.expectedNowPct : null
+    expectedScopedData ? expectedScopedData.expectedNowPct : null
   );
 
   const xaxisLayout = {
@@ -2465,16 +2491,16 @@ setInterval(refreshData, __POLL_MS__);
             "null" if notify_extra_threshold_pct is None else str(float(notify_extra_threshold_pct)),
         )
         .replace(
-            "__NOTIFY_SONNET_THRESHOLD_PCT__",
-            "null" if notify_sonnet_threshold_pct is None else str(float(notify_sonnet_threshold_pct)),
+            "__NOTIFY_SCOPED_THRESHOLD_PCT__",
+            "null" if notify_scoped_threshold_pct is None else str(float(notify_scoped_threshold_pct)),
         )
         .replace(
             "__NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__",
             "true" if notify_expected_weekly_overrun_enabled else "false",
         )
         .replace(
-            "__NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED__",
-            "true" if notify_expected_sonnet_overrun_enabled else "false",
+            "__NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED__",
+            "true" if notify_expected_scoped_overrun_enabled else "false",
         )
         .replace(
             "__NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__",
