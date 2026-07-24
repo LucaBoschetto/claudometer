@@ -27,6 +27,17 @@ CREATE TABLE usage_runs (
 );
 """
 
+# Schema predating even sonnet_pct: neither sonnet_pct nor scoped_pct exists yet.
+PRE_SONNET_SCHEMA = """
+CREATE TABLE usage_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_start TEXT NOT NULL, ts_end TEXT NOT NULL, sample_count INTEGER NOT NULL,
+  session_pct REAL, session_resets TEXT, weekly_pct REAL, weekly_resets TEXT,
+  extra_pct REAL, extra_enabled INTEGER, extra_used_credits REAL,
+  extra_monthly_limit REAL
+);
+"""
+
 failures: list[str] = []
 
 
@@ -74,6 +85,25 @@ with tempfile.TemporaryDirectory() as tmp:
         labels = [r[0] for r in conn.execute("SELECT scoped_model FROM usage_runs "
                                               "ORDER BY id").fetchall()]
         check("idempotent re-init keeps labels", labels == ["Sonnet", None])
+
+print()
+print("pre-sonnet_pct table gets scoped_pct and scoped_model:")
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = pathlib.Path(tmp) / "usage.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(PRE_SONNET_SCHEMA)
+        conn.execute(
+            "INSERT INTO usage_runs (ts_start, ts_end, sample_count) VALUES ('t0','t0',1)"
+        )
+        conn.commit()
+
+    UsageDB(path).init()
+
+    with sqlite3.connect(path) as conn:
+        cols = columns(conn)
+        check("scoped_pct column added", "scoped_pct" in cols)
+        check("scoped_model column added", "scoped_model" in cols)
 
 print()
 if failures:

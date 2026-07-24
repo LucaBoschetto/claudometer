@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS usage_runs (
 
 # Columns added after initial schema; applied via ALTER TABLE on existing DBs.
 USAGE_RUNS_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("scoped_pct", "REAL"),
     ("scoped_model", "TEXT"),
 )
 
@@ -341,9 +342,11 @@ class UsageDB:
                 conn.execute(f"ALTER TABLE usage_runs ADD COLUMN {column_name} {column_type}")
                 existing_columns.add(column_name)
         if needs_backfill:
-            # Every pre-rename non-null row was Sonnet.
+            # Every pre-rename non-null row was Sonnet. Guard on NULL so a re-run
+            # or any already-labelled row is never relabelled.
             conn.execute(
-                "UPDATE usage_runs SET scoped_model = 'Sonnet' WHERE scoped_pct IS NOT NULL"
+                "UPDATE usage_runs SET scoped_model = 'Sonnet' "
+                "WHERE scoped_pct IS NOT NULL AND scoped_model IS NULL"
             )
 
     @contextmanager
