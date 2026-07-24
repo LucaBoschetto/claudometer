@@ -1206,6 +1206,18 @@ function fmtPct(v) {
   return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + '%';
 }
 
+// The summary table is built as an innerHTML string, so any value that isn't a
+// hardcoded constant has to be escaped. row.metric is the only dynamic text
+// field: the scoped row's label comes from the API's scope.model.display_name.
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedScopedNowPct, sessionBurnNow, weeklyBurnNow) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
   const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
@@ -1283,7 +1295,7 @@ function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct,
       const expectedOverrun = hasExpected && row.rawExpected !== null && row.rawUsage !== null && row.rawUsage > row.rawExpected;
       const expectedStyle = expectedOverrun ? ' style="color: var(--accent-2)"' : '';
       return `<tr>
-        <td data-cell="metric">${row.metric}</td>
+        <td data-cell="metric">${escapeHtml(row.metric)}</td>
         <td data-label="Usage">${row.usage}</td>
         <td data-label="Burn rate">${fmtBurn(row.burn)}</td>
         <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
