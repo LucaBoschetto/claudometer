@@ -225,13 +225,13 @@ def _build_handler(
                     if expected_weekly_line_enabled
                     else None
                 )
-                expected_sonnet = (
+                expected_scoped = (
                     _expected_weekly_pct(
                         weekly_resets,
                         expected_active_start_hhmm,
                         expected_active_end_hhmm,
                     )
-                    if expected_weekly_line_enabled and last.get("sonnet_pct") is not None
+                    if expected_weekly_line_enabled and last.get("scoped_pct") is not None
                     else None
                 )
                 payload = {
@@ -239,12 +239,13 @@ def _build_handler(
                     "current": {
                         "session_pct": last.get("session_pct"),
                         "weekly_pct": last.get("weekly_pct"),
-                        "sonnet_pct": last.get("sonnet_pct"),
+                        "scoped_pct": last.get("scoped_pct"),
+                        "scoped_model": last.get("scoped_model"),
                     },
                     "expected": {
                         "session_pct": round(expected_session, 2) if expected_session is not None else None,
                         "weekly_pct": round(expected_weekly, 2) if expected_weekly is not None else None,
-                        "sonnet_pct": round(expected_sonnet, 2) if expected_sonnet is not None else None,
+                        "scoped_pct": round(expected_scoped, 2) if expected_scoped is not None else None,
                     },
                     "resets": {
                         "session": session_resets,
