@@ -47,13 +47,14 @@ CREATE TABLE IF NOT EXISTS usage_runs (
   extra_enabled       INTEGER,
   extra_used_credits  REAL,
   extra_monthly_limit REAL,
-  sonnet_pct          REAL
+  scoped_pct          REAL,
+  scoped_model        TEXT
 );
 """
 
 # Columns added after initial schema; applied via ALTER TABLE on existing DBs.
 USAGE_RUNS_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("sonnet_pct", "REAL"),
+    ("scoped_model", "TEXT"),
 )
 
 USAGE_RUNS_INDEX_SQL = """
@@ -110,7 +111,8 @@ class UsageDB:
                   extra_enabled,
                   extra_used_credits,
                   extra_monthly_limit,
-                  sonnet_pct
+                  scoped_pct,
+                  scoped_model
                 FROM usage_runs
                 ORDER BY ts_end DESC, id DESC
                 LIMIT 1
@@ -141,8 +143,9 @@ class UsageDB:
                       extra_enabled,
                       extra_used_credits,
                       extra_monthly_limit,
-                      sonnet_pct
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      scoped_pct,
+                      scoped_model
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         normalized.ts,
@@ -156,7 +159,8 @@ class UsageDB:
                         None if normalized.extra_enabled is None else int(normalized.extra_enabled),
                         normalized.extra_used_credits,
                         normalized.extra_monthly_limit,
-                        normalized.sonnet_pct,
+                        normalized.scoped_pct,
+                        normalized.scoped_model,
                     ),
                 )
             conn.commit()
@@ -177,7 +181,8 @@ class UsageDB:
                   extra_enabled,
                   extra_used_credits,
                   extra_monthly_limit,
-                  sonnet_pct
+                  scoped_pct,
+                  scoped_model
                 FROM usage_runs
                 ORDER BY ts_end DESC, id DESC
                 LIMIT 1
@@ -212,7 +217,8 @@ class UsageDB:
                       extra_enabled,
                       extra_used_credits,
                       extra_monthly_limit,
-                      sonnet_pct
+                      scoped_pct,
+                      scoped_model
                     FROM usage_runs
                     ORDER BY ts_start ASC, id ASC
                     """
@@ -232,7 +238,8 @@ class UsageDB:
                       extra_enabled,
                       extra_used_credits,
                       extra_monthly_limit,
-                      sonnet_pct
+                      scoped_pct,
+                      scoped_model
                     FROM usage_runs
                     WHERE ts_end >= ? AND ts_start < ?
                     ORDER BY ts_start ASC, id ASC
@@ -320,9 +327,24 @@ class UsageDB:
         existing_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(usage_runs)").fetchall()
         }
+        # The model-scoped column used to hold Sonnet; it now holds whatever model
+        # the API scopes the weekly cap to (Fable at time of writing). Rename in
+        # place so the months of Sonnet history stay as one continuous series.
+        needs_backfill = False
+        if "sonnet_pct" in existing_columns and "scoped_pct" not in existing_columns:
+            conn.execute("ALTER TABLE usage_runs RENAME COLUMN sonnet_pct TO scoped_pct")
+            existing_columns.discard("sonnet_pct")
+            existing_columns.add("scoped_pct")
+            needs_backfill = True
         for column_name, column_type in USAGE_RUNS_NEW_COLUMNS:
             if column_name not in existing_columns:
                 conn.execute(f"ALTER TABLE usage_runs ADD COLUMN {column_name} {column_type}")
+                existing_columns.add(column_name)
+        if needs_backfill:
+            # Every pre-rename non-null row was Sonnet.
+            conn.execute(
+                "UPDATE usage_runs SET scoped_model = 'Sonnet' WHERE scoped_pct IS NOT NULL"
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -415,8 +437,9 @@ class UsageDB:
               extra_enabled,
               extra_used_credits,
               extra_monthly_limit,
-              sonnet_pct
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              scoped_pct,
+              scoped_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             runs,
         )
@@ -439,7 +462,8 @@ class UsageDB:
             and _boolish(sample.extra_enabled) == _boolish(run["extra_enabled"])
             and sample.extra_used_credits == run["extra_used_credits"]
             and sample.extra_monthly_limit == run["extra_monthly_limit"]
-            and sample.sonnet_pct == run["sonnet_pct"]
+            and sample.scoped_pct == run["scoped_pct"]
+            and sample.scoped_model == run["scoped_model"]
         )
 
     def _sample_from_legacy_row(self, row: sqlite3.Row) -> UsageSample:
@@ -469,7 +493,8 @@ class UsageDB:
             run["extra_enabled"],
             run["extra_used_credits"],
             run["extra_monthly_limit"],
-            run.get("sonnet_pct"),
+            run.get("scoped_pct"),
+            run.get("scoped_model"),
         )
 
     def _migrate_legacy_usage_log(self, conn: sqlite3.Connection) -> None:
@@ -594,7 +619,8 @@ class UsageDB:
             "extra_enabled": run["extra_enabled"],
             "extra_used_credits": run["extra_used_credits"],
             "extra_monthly_limit": run["extra_monthly_limit"],
-            "sonnet_pct": run.get("sonnet_pct"),
+            "scoped_pct": run.get("scoped_pct"),
+            "scoped_model": run.get("scoped_model"),
         }
 
 

@@ -7,5 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python scripts/collapse_check.py
+python scripts/scoped_parse_check.py
+python scripts/scoped_migration_check.py
 python scripts/extract_js.py > scripts/shipped.mjs
 node --test scripts/*.test.mjs
