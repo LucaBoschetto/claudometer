@@ -109,9 +109,9 @@ def start_dashboard_server(
     notify_session_threshold_pct: float | None,
     notify_weekly_threshold_pct: float | None,
     notify_extra_threshold_pct: float | None,
-    notify_sonnet_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
-    notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
     notify_expected_session_overrun_enabled: bool,
 ) -> ThreadingHTTPServer:
     handler_cls = _build_handler(
@@ -123,9 +123,9 @@ def start_dashboard_server(
         notify_session_threshold_pct,
         notify_weekly_threshold_pct,
         notify_extra_threshold_pct,
-        notify_sonnet_threshold_pct,
+        notify_scoped_threshold_pct,
         notify_expected_weekly_overrun_enabled,
-        notify_expected_sonnet_overrun_enabled,
+        notify_expected_scoped_overrun_enabled,
         notify_expected_session_overrun_enabled,
     )
     server = ReusableThreadingHTTPServer((host, port), handler_cls)
@@ -146,9 +146,9 @@ def _build_handler(
     notify_session_threshold_pct: float | None,
     notify_weekly_threshold_pct: float | None,
     notify_extra_threshold_pct: float | None,
-    notify_sonnet_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
-    notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
     notify_expected_session_overrun_enabled: bool,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
@@ -170,9 +170,9 @@ def _build_handler(
                         notify_session_threshold_pct,
                         notify_weekly_threshold_pct,
                         notify_extra_threshold_pct,
-                        notify_sonnet_threshold_pct,
+                        notify_scoped_threshold_pct,
                         notify_expected_weekly_overrun_enabled,
-                        notify_expected_sonnet_overrun_enabled,
+                        notify_expected_scoped_overrun_enabled,
                         notify_expected_session_overrun_enabled,
                     )
                 )
@@ -196,9 +196,9 @@ def _build_handler(
                     "session_threshold_pct": current_config.notify_session_threshold_pct,
                     "weekly_threshold_pct": current_config.notify_weekly_threshold_pct,
                     "extra_threshold_pct": current_config.notify_extra_threshold_pct,
-                    "sonnet_threshold_pct": current_config.notify_sonnet_threshold_pct,
+                    "scoped_threshold_pct": current_config.notify_scoped_threshold_pct,
                     "expected_weekly_overrun_enabled": current_config.notify_expected_weekly_overrun_enabled,
-                    "expected_sonnet_overrun_enabled": current_config.notify_expected_sonnet_overrun_enabled,
+                    "expected_scoped_overrun_enabled": current_config.notify_expected_scoped_overrun_enabled,
                     "expected_session_overrun_enabled": current_config.notify_expected_session_overrun_enabled,
                 }
                 self._respond_json(payload)
@@ -269,12 +269,12 @@ def _build_handler(
                         "NOTIFY_SESSION_THRESHOLD_PCT": normalized["session_threshold_pct"],
                         "NOTIFY_WEEKLY_THRESHOLD_PCT": normalized["weekly_threshold_pct"],
                         "NOTIFY_EXTRA_THRESHOLD_PCT": normalized["extra_threshold_pct"],
-                        "NOTIFY_SONNET_THRESHOLD_PCT": normalized["sonnet_threshold_pct"],
+                        "NOTIFY_SCOPED_THRESHOLD_PCT": normalized["scoped_threshold_pct"],
                         "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": normalized[
                             "expected_weekly_overrun_enabled"
                         ],
-                        "NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED": normalized[
-                            "expected_sonnet_overrun_enabled"
+                        "NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED": normalized[
+                            "expected_scoped_overrun_enabled"
                         ],
                         "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED": normalized[
                             "expected_session_overrun_enabled"
@@ -295,12 +295,12 @@ def _build_handler(
                         "session_threshold_pct": _as_number_or_none(normalized["session_threshold_pct"]),
                         "weekly_threshold_pct": _as_number_or_none(normalized["weekly_threshold_pct"]),
                         "extra_threshold_pct": _as_number_or_none(normalized["extra_threshold_pct"]),
-                        "sonnet_threshold_pct": _as_number_or_none(normalized["sonnet_threshold_pct"]),
+                        "scoped_threshold_pct": _as_number_or_none(normalized["scoped_threshold_pct"]),
                         "expected_weekly_overrun_enabled": normalized[
                             "expected_weekly_overrun_enabled"
                         ] == "true",
-                        "expected_sonnet_overrun_enabled": normalized[
-                            "expected_sonnet_overrun_enabled"
+                        "expected_scoped_overrun_enabled": normalized[
+                            "expected_scoped_overrun_enabled"
                         ] == "true",
                         "expected_session_overrun_enabled": normalized[
                             "expected_session_overrun_enabled"
@@ -396,14 +396,14 @@ def _normalize_notification_settings(payload: dict[str, Any]) -> dict[str, str]:
         "extra_threshold_pct": _normalize_threshold_value(
             payload.get("extra_threshold_pct"), "Extra usage threshold"
         ),
-        "sonnet_threshold_pct": _normalize_threshold_value(
-            payload.get("sonnet_threshold_pct"), "Sonnet threshold"
+        "scoped_threshold_pct": _normalize_threshold_value(
+            payload.get("scoped_threshold_pct"), "Scoped threshold"
         ),
         "expected_weekly_overrun_enabled": "true"
         if bool(payload.get("expected_weekly_overrun_enabled"))
         else "false",
-        "expected_sonnet_overrun_enabled": "true"
-        if bool(payload.get("expected_sonnet_overrun_enabled"))
+        "expected_scoped_overrun_enabled": "true"
+        if bool(payload.get("expected_scoped_overrun_enabled"))
         else "false",
         "expected_session_overrun_enabled": "true"
         if bool(payload.get("expected_session_overrun_enabled"))
@@ -960,9 +960,9 @@ def _app_js(
     notify_session_threshold_pct: float | None,
     notify_weekly_threshold_pct: float | None,
     notify_extra_threshold_pct: float | None,
-    notify_sonnet_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
     notify_expected_weekly_overrun_enabled: bool,
-    notify_expected_sonnet_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
     notify_expected_session_overrun_enabled: bool,
 ) -> str:
     poll_ms = poll_interval_seconds * 1000
@@ -993,9 +993,9 @@ const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
 let notifySessionThresholdPct = __NOTIFY_SESSION_THRESHOLD_PCT__;
 let notifyWeeklyThresholdPct = __NOTIFY_WEEKLY_THRESHOLD_PCT__;
 let notifyExtraThresholdPct = __NOTIFY_EXTRA_THRESHOLD_PCT__;
-let notifySonnetThresholdPct = __NOTIFY_SONNET_THRESHOLD_PCT__;
+let notifySonnetThresholdPct = __NOTIFY_SCOPED_THRESHOLD_PCT__;
 let notifyExpectedWeeklyOverrunEnabled = __NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__;
-let notifyExpectedSonnetOverrunEnabled = __NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED__;
+let notifyExpectedSonnetOverrunEnabled = __NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED__;
 let notifyExpectedSessionOverrunEnabled = __NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__;
 
 let hasInitializedXRange = false;
@@ -2465,16 +2465,16 @@ setInterval(refreshData, __POLL_MS__);
             "null" if notify_extra_threshold_pct is None else str(float(notify_extra_threshold_pct)),
         )
         .replace(
-            "__NOTIFY_SONNET_THRESHOLD_PCT__",
-            "null" if notify_sonnet_threshold_pct is None else str(float(notify_sonnet_threshold_pct)),
+            "__NOTIFY_SCOPED_THRESHOLD_PCT__",
+            "null" if notify_scoped_threshold_pct is None else str(float(notify_scoped_threshold_pct)),
         )
         .replace(
             "__NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__",
             "true" if notify_expected_weekly_overrun_enabled else "false",
         )
         .replace(
-            "__NOTIFY_EXPECTED_SONNET_OVERRUN_ENABLED__",
-            "true" if notify_expected_sonnet_overrun_enabled else "false",
+            "__NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED__",
+            "true" if notify_expected_scoped_overrun_enabled else "false",
         )
         .replace(
             "__NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__",
