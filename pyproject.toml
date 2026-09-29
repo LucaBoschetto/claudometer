@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Lightweight local tracker for Claude AI usage"
 requires-python = ">=3.12"
 dependencies = [
-    "playwright>=1.58.0",
-    "python-dotenv>=1.2.2",
-    "requests>=2.32.5",
+    "playwright>=1.63.0",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
 ]
