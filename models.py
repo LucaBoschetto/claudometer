@@ -29,6 +29,11 @@ class UsageSample:
     weekly_pct: Optional[float]
     weekly_resets: Optional[str]
     extra_pct: Optional[float]
+    extra_enabled: Optional[bool]
+    extra_used_credits: Optional[float]
+    extra_monthly_limit: Optional[float]
+    scoped_pct: Optional[float] = None
+    scoped_model: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

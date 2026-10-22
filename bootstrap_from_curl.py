@@ -16,12 +16,6 @@ def parse_curl(curl_text: str) -> dict[str, str]:
     if not org_match:
         raise ValueError("Could not find organization ID in cURL text")
 
-    cookie_match = COOKIE_RE.search(curl_text)
-    if not cookie_match:
-        raise ValueError("Could not find cookie header (-b) in cURL text")
-
-    raw_cookie = cookie_match.group(1) or cookie_match.group(2)
-
     headers = {}
     for m in HEADER_RE.finditer(curl_text):
         raw = m.group(1) or m.group(2)
@@ -29,6 +23,14 @@ def parse_curl(curl_text: str) -> dict[str, str]:
             continue
         k, v = raw.split(":", 1)
         headers[k.strip().lower()] = v.strip()
+
+    cookie_match = COOKIE_RE.search(curl_text)
+    if cookie_match:
+        raw_cookie = cookie_match.group(1) or cookie_match.group(2)
+    else:
+        raw_cookie = headers.get("cookie", "")
+    if not raw_cookie:
+        raise ValueError("Could not find cookies via -b flag or -H 'Cookie: ...' header")
 
     return {
         "CLAUDE_ORG_ID": org_match.group(1),

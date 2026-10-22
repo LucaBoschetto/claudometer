@@ -13,12 +13,59 @@ DB_PATH = RUNTIME_DIR / "usage.db"
 LOG_PATH = RUNTIME_DIR / "dashboard.log"
 BROWSER_PROFILE_DIR = RUNTIME_DIR / "browser-profile"
 
+# Trailing window for the dashboard's burn-rate math (computeBurnRate in
+# web.py). db.py's range=all collapse must keep enough points to sample the
+# decay across this window, so the server, the served JS and the tests all read
+# it from here rather than each hardcoding 30.
+BURN_WINDOW_MINUTES = 30
+
+RUNTIME_ENV_ORDER = (
+    "CLAUDE_ORG_ID",
+    "CLAUDE_COOKIE_HEADER",
+    "ANTHROPIC_DEVICE_ID",
+    "ANTHROPIC_ANONYMOUS_ID",
+    "POLL_INTERVAL_SECONDS",
+    "DASHBOARD_HOST",
+    "DASHBOARD_PORT",
+    "AUTH_BROWSER",
+    "EXPECTED_WEEKLY_LINE_ENABLED",
+    "EXPECTED_ACTIVE_START_HHMM",
+    "EXPECTED_ACTIVE_END_HHMM",
+    "NOTIFY_SESSION_THRESHOLD_PCT",
+    "NOTIFY_WEEKLY_THRESHOLD_PCT",
+    "NOTIFY_EXTRA_THRESHOLD_PCT",
+    "NOTIFY_SCOPED_THRESHOLD_PCT",
+    "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED",
+    "NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED",
+    "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED",
+    "USER_AGENT",
+)
+
+RUNTIME_ENV_DEFAULTS = {
+    "POLL_INTERVAL_SECONDS": "60",
+    "DASHBOARD_HOST": "127.0.0.1",
+    "DASHBOARD_PORT": "7474",
+    "AUTH_BROWSER": "chrome",
+    "EXPECTED_WEEKLY_LINE_ENABLED": "true",
+    "EXPECTED_ACTIVE_START_HHMM": "08:00",
+    "EXPECTED_ACTIVE_END_HHMM": "19:00",
+    "NOTIFY_SESSION_THRESHOLD_PCT": "",
+    "NOTIFY_WEEKLY_THRESHOLD_PCT": "",
+    "NOTIFY_EXTRA_THRESHOLD_PCT": "",
+    "NOTIFY_SCOPED_THRESHOLD_PCT": "",
+    "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": "false",
+    "NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED": "false",
+    "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED": "false",
+    "USER_AGENT": "",
+}
+
 
 @dataclass
 class AppConfig:
     poll_interval_seconds: int
     host: str
     port: int
+    auth_browser: str
     claude_org_id: Optional[str]
     claude_cookie_header: Optional[str]
     anthropic_anonymous_id: Optional[str]
@@ -27,6 +74,13 @@ class AppConfig:
     expected_weekly_line_enabled: bool
     expected_active_start_hhmm: str
     expected_active_end_hhmm: str
+    notify_session_threshold_pct: Optional[float]
+    notify_weekly_threshold_pct: Optional[float]
+    notify_extra_threshold_pct: Optional[float]
+    notify_scoped_threshold_pct: Optional[float]
+    notify_expected_weekly_overrun_enabled: bool
+    notify_expected_scoped_overrun_enabled: bool
+    notify_expected_session_overrun_enabled: bool
 
 
 DEFAULT_USER_AGENT = (
@@ -71,6 +125,30 @@ def _normalize_hhmm(raw: str | None, default: str) -> str:
     return f"{h:02d}:{m:02d}"
 
 
+def _normalize_auth_browser(raw: str | None, default: str) -> str:
+    if not raw:
+        return default
+    value = raw.strip().lower()
+    if value in {"chrome", "chromium", "firefox", "webkit"}:
+        return value
+    return default
+
+
+def _as_pct_threshold(raw: str | None) -> Optional[float]:
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    if parsed < 0 or parsed > 100:
+        return None
+    return parsed
+
+
 def load_config() -> AppConfig:
     ensure_runtime_paths()
 
@@ -89,6 +167,7 @@ def load_config() -> AppConfig:
         poll_interval_seconds=max(5, _as_int(get("POLL_INTERVAL_SECONDS"), 60)),
         host=get("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1",
         port=_as_int(get("DASHBOARD_PORT"), 7474),
+        auth_browser=_normalize_auth_browser(get("AUTH_BROWSER"), "chrome"),
         claude_org_id=get("CLAUDE_ORG_ID"),
         claude_cookie_header=get("CLAUDE_COOKIE_HEADER"),
         anthropic_anonymous_id=get("ANTHROPIC_ANONYMOUS_ID"),
@@ -97,8 +176,46 @@ def load_config() -> AppConfig:
         expected_weekly_line_enabled=_as_bool(get("EXPECTED_WEEKLY_LINE_ENABLED"), True),
         expected_active_start_hhmm=_normalize_hhmm(get("EXPECTED_ACTIVE_START_HHMM"), "08:00"),
         expected_active_end_hhmm=_normalize_hhmm(get("EXPECTED_ACTIVE_END_HHMM"), "19:00"),
+        notify_session_threshold_pct=_as_pct_threshold(get("NOTIFY_SESSION_THRESHOLD_PCT")),
+        notify_weekly_threshold_pct=_as_pct_threshold(get("NOTIFY_WEEKLY_THRESHOLD_PCT")),
+        notify_extra_threshold_pct=_as_pct_threshold(get("NOTIFY_EXTRA_THRESHOLD_PCT")),
+        notify_scoped_threshold_pct=_as_pct_threshold(get("NOTIFY_SCOPED_THRESHOLD_PCT")),
+        notify_expected_weekly_overrun_enabled=_as_bool(
+            get("NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED"), False
+        ),
+        notify_expected_scoped_overrun_enabled=_as_bool(
+            get("NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED"), False
+        ),
+        notify_expected_session_overrun_enabled=_as_bool(
+            get("NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED"), False
+        ),
     )
 
 
 def has_api_auth(config: AppConfig) -> bool:
     return bool(config.claude_org_id and config.claude_cookie_header)
+
+
+def read_runtime_env_values() -> dict[str, str]:
+    ensure_runtime_paths()
+    values: dict[str, str] = {}
+    if not RUNTIME_ENV_PATH.exists():
+        return values
+    for line in RUNTIME_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        if not line or line.strip().startswith("#") or "=" not in line:
+            continue
+        key, raw = line.split("=", 1)
+        values[key.strip()] = raw.strip()
+    return values
+
+
+def write_runtime_env_values(overrides: dict[str, str]) -> None:
+    ensure_runtime_paths()
+    values = read_runtime_env_values()
+    values.update(overrides)
+
+    lines = ["# Auto-generated by Claudometer. Do not share this file."]
+    for key in RUNTIME_ENV_ORDER:
+        lines.append(f"{key}={values.get(key, RUNTIME_ENV_DEFAULTS.get(key, ''))}")
+
+    RUNTIME_ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")

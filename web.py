@@ -2,12 +2,95 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from threading import Thread
 from typing import Any
 
+from config import BURN_WINDOW_MINUTES, load_config, write_runtime_env_values
 from db import UsageDB
+
+
+def _hhmm_to_minutes(hhmm: str) -> int | None:
+    parts = hhmm.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hh, mm = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return hh * 60 + mm
+
+
+def _active_ms_between(
+    start: datetime, end: datetime, start_min: int, end_min: int
+) -> float:
+    start_ts = start.timestamp() * 1000
+    end_ts = end.timestamp() * 1000
+    if end_ts <= start_ts:
+        return 0
+    total = 0.0
+    cursor = start.astimezone()
+    cursor = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
+    while cursor.timestamp() * 1000 < end_ts:
+        day_start_ms = cursor.timestamp() * 1000
+        active_start = day_start_ms + start_min * 60 * 1000
+        active_end = day_start_ms + end_min * 60 * 1000
+        overlap_start = max(start_ts, active_start)
+        overlap_end = min(end_ts, active_end)
+        total += max(0, overlap_end - overlap_start)
+        cursor += timedelta(days=1)
+    return total
+
+
+def _expected_session_pct(session_resets_iso: str | None) -> float | None:
+    if not session_resets_iso:
+        return None
+    try:
+        cycle_end = datetime.fromisoformat(session_resets_iso)
+    except ValueError:
+        return None
+    if cycle_end.tzinfo is None:
+        cycle_end = cycle_end.replace(tzinfo=timezone.utc)
+    cycle_start = cycle_end - timedelta(hours=5)
+    now = datetime.now(timezone.utc)
+    elapsed = max(0, (now - cycle_start).total_seconds())
+    total = (cycle_end - cycle_start).total_seconds()
+    if total <= 0:
+        return None
+    return max(0, min(100, (elapsed / total) * 100))
+
+
+def _expected_weekly_pct(
+    weekly_resets_iso: str | None, start_hhmm: str, end_hhmm: str
+) -> float | None:
+    if not weekly_resets_iso:
+        return None
+    start_min = _hhmm_to_minutes(start_hhmm)
+    end_min = _hhmm_to_minutes(end_hhmm)
+    if start_min is None or end_min is None or end_min <= start_min:
+        return None
+    try:
+        cycle_end = datetime.fromisoformat(weekly_resets_iso)
+    except ValueError:
+        return None
+    if cycle_end.tzinfo is None:
+        cycle_end = cycle_end.replace(tzinfo=timezone.utc)
+    cycle_start = cycle_end - timedelta(days=7)
+    total_active = _active_ms_between(cycle_start, cycle_end, start_min, end_min)
+    if total_active <= 0:
+        return None
+    now = datetime.now(timezone.utc)
+    if now <= cycle_start:
+        return 0.0
+    if now >= cycle_end:
+        return 100.0
+    elapsed_active = _active_ms_between(cycle_start, now, start_min, end_min)
+    return max(0, min(100, (elapsed_active / total_active) * 100))
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -23,6 +106,13 @@ def start_dashboard_server(
     expected_weekly_line_enabled: bool,
     expected_active_start_hhmm: str,
     expected_active_end_hhmm: str,
+    notify_session_threshold_pct: float | None,
+    notify_weekly_threshold_pct: float | None,
+    notify_extra_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
+    notify_expected_weekly_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
+    notify_expected_session_overrun_enabled: bool,
 ) -> ThreadingHTTPServer:
     handler_cls = _build_handler(
         db,
@@ -30,6 +120,13 @@ def start_dashboard_server(
         expected_weekly_line_enabled,
         expected_active_start_hhmm,
         expected_active_end_hhmm,
+        notify_session_threshold_pct,
+        notify_weekly_threshold_pct,
+        notify_extra_threshold_pct,
+        notify_scoped_threshold_pct,
+        notify_expected_weekly_overrun_enabled,
+        notify_expected_scoped_overrun_enabled,
+        notify_expected_session_overrun_enabled,
     )
     server = ReusableThreadingHTTPServer((host, port), handler_cls)
 
@@ -46,37 +143,172 @@ def _build_handler(
     expected_weekly_line_enabled: bool,
     expected_active_start_hhmm: str,
     expected_active_end_hhmm: str,
+    notify_session_threshold_pct: float | None,
+    notify_weekly_threshold_pct: float | None,
+    notify_extra_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
+    notify_expected_weekly_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
+    notify_expected_session_overrun_enabled: bool,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/":
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/":
                 self._respond_html(_index_html(poll_interval_seconds))
                 return
 
-            if self.path == "/app.js":
+            if path == "/app.js":
                 self._respond_js(
                     _app_js(
                         poll_interval_seconds,
                         expected_weekly_line_enabled,
                         expected_active_start_hhmm,
                         expected_active_end_hhmm,
+                        notify_session_threshold_pct,
+                        notify_weekly_threshold_pct,
+                        notify_extra_threshold_pct,
+                        notify_scoped_threshold_pct,
+                        notify_expected_weekly_overrun_enabled,
+                        notify_expected_scoped_overrun_enabled,
+                        notify_expected_session_overrun_enabled,
                     )
                 )
                 return
 
-            if self.path == "/app.css":
+            if path == "/favicon.svg":
+                self._respond_svg(_favicon_svg())
+                return
+
+            if path == "/app.css":
                 self._respond_css(_app_css())
                 return
 
-            if self.path == "/data.json":
+            if path == "/data.json":
+                query = parse_qs(parsed.query)
+                range_preset = (query.get("range") or ["all"])[0]
+                payload = db.fetch_chart_data(range_preset)
+                payload["poll_interval_seconds"] = poll_interval_seconds
+                current_config = load_config()
+                payload["notification_settings"] = {
+                    "session_threshold_pct": current_config.notify_session_threshold_pct,
+                    "weekly_threshold_pct": current_config.notify_weekly_threshold_pct,
+                    "extra_threshold_pct": current_config.notify_extra_threshold_pct,
+                    "scoped_threshold_pct": current_config.notify_scoped_threshold_pct,
+                    "expected_weekly_overrun_enabled": current_config.notify_expected_weekly_overrun_enabled,
+                    "expected_scoped_overrun_enabled": current_config.notify_expected_scoped_overrun_enabled,
+                    "expected_session_overrun_enabled": current_config.notify_expected_session_overrun_enabled,
+                }
+                self._respond_json(payload)
+                return
+
+            if path == "/last":
+                last = db.fetch_last_sample()
+                if last is None:
+                    self._respond_json({"error": "no data"})
+                    return
+                session_resets = last.get("session_resets")
+                weekly_resets = last.get("weekly_resets")
+                expected_session = (
+                    _expected_session_pct(session_resets)
+                    if expected_weekly_line_enabled
+                    else None
+                )
+                expected_weekly = (
+                    _expected_weekly_pct(
+                        weekly_resets,
+                        expected_active_start_hhmm,
+                        expected_active_end_hhmm,
+                    )
+                    if expected_weekly_line_enabled
+                    else None
+                )
+                expected_scoped = (
+                    _expected_weekly_pct(
+                        weekly_resets,
+                        expected_active_start_hhmm,
+                        expected_active_end_hhmm,
+                    )
+                    if expected_weekly_line_enabled and last.get("scoped_pct") is not None
+                    else None
+                )
                 payload = {
-                    "rows": db.fetch_all(),
-                    "poll_interval_seconds": poll_interval_seconds,
+                    "ts": last["ts_end"],
+                    "current": {
+                        "session_pct": last.get("session_pct"),
+                        "weekly_pct": last.get("weekly_pct"),
+                        "scoped_pct": last.get("scoped_pct"),
+                        "scoped_model": last.get("scoped_model"),
+                    },
+                    "expected": {
+                        "session_pct": round(expected_session, 2) if expected_session is not None else None,
+                        "weekly_pct": round(expected_weekly, 2) if expected_weekly is not None else None,
+                        "scoped_pct": round(expected_scoped, 2) if expected_scoped is not None else None,
+                    },
+                    "resets": {
+                        "session": session_resets,
+                        "weekly": weekly_resets,
+                    },
                 }
                 self._respond_json(payload)
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path != "/notification-settings":
+                self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+                return
+
+            try:
+                payload = self._read_json_body()
+                normalized = _normalize_notification_settings(payload)
+                write_runtime_env_values(
+                    {
+                        "NOTIFY_SESSION_THRESHOLD_PCT": normalized["session_threshold_pct"],
+                        "NOTIFY_WEEKLY_THRESHOLD_PCT": normalized["weekly_threshold_pct"],
+                        "NOTIFY_EXTRA_THRESHOLD_PCT": normalized["extra_threshold_pct"],
+                        "NOTIFY_SCOPED_THRESHOLD_PCT": normalized["scoped_threshold_pct"],
+                        "NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED": normalized[
+                            "expected_weekly_overrun_enabled"
+                        ],
+                        "NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED": normalized[
+                            "expected_scoped_overrun_enabled"
+                        ],
+                        "NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED": normalized[
+                            "expected_session_overrun_enabled"
+                        ],
+                    }
+                )
+            except ValueError as exc:
+                self._respond_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._respond_json({"error": f"Could not save settings: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+
+            self._respond_json(
+                {
+                    "ok": True,
+                    "notification_settings": {
+                        "session_threshold_pct": _as_number_or_none(normalized["session_threshold_pct"]),
+                        "weekly_threshold_pct": _as_number_or_none(normalized["weekly_threshold_pct"]),
+                        "extra_threshold_pct": _as_number_or_none(normalized["extra_threshold_pct"]),
+                        "scoped_threshold_pct": _as_number_or_none(normalized["scoped_threshold_pct"]),
+                        "expected_weekly_overrun_enabled": normalized[
+                            "expected_weekly_overrun_enabled"
+                        ] == "true",
+                        "expected_scoped_overrun_enabled": normalized[
+                            "expected_scoped_overrun_enabled"
+                        ] == "true",
+                        "expected_session_overrun_enabled": normalized[
+                            "expected_session_overrun_enabled"
+                        ] == "true",
+                    },
+                }
+            )
 
         def log_message(self, fmt: str, *args: Any) -> None:
             return
@@ -102,14 +334,88 @@ def _build_handler(
             self.end_headers()
             self.wfile.write(body.encode("utf-8"))
 
-        def _respond_json(self, payload: dict[str, Any]) -> None:
+        def _respond_svg(self, body: str) -> None:
             self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+
+        def _respond_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
 
+        def _read_json_body(self) -> dict[str, Any]:
+            raw_length = self.headers.get("Content-Length", "0")
+            try:
+                length = int(raw_length)
+            except ValueError as exc:
+                raise ValueError("Invalid request length") from exc
+            body = self.rfile.read(length)
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ValueError("Invalid JSON payload") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("JSON payload must be an object")
+            return payload
+
     return DashboardHandler
+
+
+def _normalize_threshold_value(raw: Any, label: str) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return ""
+    else:
+        value = str(raw).strip()
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a number between 0 and 100") from exc
+
+    if parsed < 0 or parsed > 100:
+        raise ValueError(f"{label} must be between 0 and 100")
+    return f"{parsed:.1f}".rstrip("0").rstrip(".")
+
+
+def _normalize_notification_settings(payload: dict[str, Any]) -> dict[str, str]:
+    return {
+        "session_threshold_pct": _normalize_threshold_value(
+            payload.get("session_threshold_pct"), "Session threshold"
+        ),
+        "weekly_threshold_pct": _normalize_threshold_value(
+            payload.get("weekly_threshold_pct"), "Weekly threshold"
+        ),
+        "extra_threshold_pct": _normalize_threshold_value(
+            payload.get("extra_threshold_pct"), "Extra usage threshold"
+        ),
+        "scoped_threshold_pct": _normalize_threshold_value(
+            payload.get("scoped_threshold_pct"), "Scoped threshold"
+        ),
+        "expected_weekly_overrun_enabled": "true"
+        if bool(payload.get("expected_weekly_overrun_enabled"))
+        else "false",
+        "expected_scoped_overrun_enabled": "true"
+        if bool(payload.get("expected_scoped_overrun_enabled"))
+        else "false",
+        "expected_session_overrun_enabled": "true"
+        if bool(payload.get("expected_session_overrun_enabled"))
+        else "false",
+    }
+
+
+def _as_number_or_none(raw: str) -> float | None:
+    if not raw:
+        return None
+    return float(raw)
 
 
 def _index_html(poll_interval_seconds: int) -> str:
@@ -119,51 +425,108 @@ def _index_html(poll_interval_seconds: int) -> str:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Claude Usage Tracker</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="stylesheet" href="/app.css" />
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body class="theme-dark">
-  <main>
+  <main class="dashboard-shell">
     <header class="topbar">
-      <div>
+      <div class="title-block">
+        <p class="eyebrow">Local dashboard</p>
         <h1>Claude Usage Tracker</h1>
         <p id="status">Polling every {poll_interval_seconds}s</p>
       </div>
       <div class="controls">
-        <label for="view-mode">View</label>
-        <select id="view-mode">
-          <option value="raw">Raw</option>
-          <option value="clean">Cleaned</option>
-          <option value="smooth">Smoothed</option>
-        </select>
+        <div class="control-field">
+          <label for="view-mode">View</label>
+          <select id="view-mode">
+            <option value="raw">Raw</option>
+            <option value="clean">Cleaned</option>
+            <option value="smooth">Smoothed</option>
+          </select>
+        </div>
 
-        <label for="range-preset">Range</label>
-        <select id="range-preset">
-          <option value="today">Today</option>
-          <option value="weekly_cycle">Since weekly reset</option>
-          <option value="all">All time</option>
-          <option value="manual">Manual zoom</option>
-        </select>
+        <div class="control-field">
+          <label for="range-preset">Range</label>
+          <select id="range-preset">
+            <option value="today">Today</option>
+            <option value="weekly_cycle">Since weekly reset</option>
+            <option value="all">All time</option>
+            <option value="manual">Manual zoom</option>
+          </select>
+        </div>
 
-        <button id="y-reset" title="Reset Y axis zoom (0-100)" aria-label="Reset Y axis zoom (0-100)">⟲</button>
-        <button id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">☀</button>
+        <div class="control-actions">
+          <button id="y-reset" title="Reset Y axis zoom (0-100)" aria-label="Reset Y axis zoom (0-100)">Reset Y</button>
+          <button id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">Light</button>
+        </div>
       </div>
     </header>
 
-    <div id="chart" aria-label="usage chart"></div>
+    <section class="panel chart-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Live usage</p>
+          <h2>Usage history</h2>
+        </div>
+      </div>
+      <div id="chart-loading" class="chart-loading" aria-live="polite">
+        <div class="chart-spinner" aria-hidden="true"></div>
+        <span>Loading usage data…</span>
+      </div>
+      <div id="chart" aria-label="usage chart"></div>
+    </section>
 
-    <div id="summary-wrap" aria-live="polite">
+    <section class="panel burn-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Rate of change</p>
+          <h2>Burn rate</h2>
+        </div>
+      </div>
+      <div class="burn-charts">
+        <div class="burn-chart-block">
+          <div class="burn-chart-title">Current session <span id="burn-session-now" class="burn-now">-</span></div>
+          <div id="burn-chart-session" aria-label="session burn rate chart"></div>
+        </div>
+        <div class="burn-chart-block">
+          <div class="burn-chart-title">Weekly <span id="burn-weekly-now" class="burn-now">-</span></div>
+          <div id="burn-chart-weekly" aria-label="weekly burn rate chart"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="summary-wrap" class="panel" aria-live="polite">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Current state</p>
+          <h2>Summary</h2>
+        </div>
+        <div class="panel-actions">
+          <span id="save-alert-status" aria-live="polite"></span>
+          <label id="notifications-toggle-wrap" class="toggle-chip" title="Enable browser alerts">
+            <input id="notifications-toggle" type="checkbox" aria-label="Alerts enabled" />
+            <span id="notifications-toggle-text">Alerts enabled</span>
+          </label>
+          <button id="save-alert-settings" type="button" disabled>Save Alerts</button>
+        </div>
+      </div>
       <table id="summary-table">
         <thead>
           <tr>
             <th>Metric</th>
             <th>Usage</th>
-            <th>Resets At (Local)</th>
+            <th>Burn rate</th>
+            <th>Expected</th>
+            <th>Resets at (Local)</th>
+            <th>Alert</th>
+            <th>Overrun alert</th>
           </tr>
         </thead>
         <tbody id="summary-body"></tbody>
       </table>
-    </div>
+    </section>
   </main>
   <script src="/app.js"></script>
 </body>
@@ -174,95 +537,420 @@ def _index_html(poll_interval_seconds: int) -> str:
 def _app_css() -> str:
     return """
 :root {
-  --bg: #0f1115;
-  --bg-2: #171a20;
-  --card: #151922;
-  --fg: #f3f5f7;
-  --muted: #adb6c2;
-  --line: #2a313d;
+  --bg: #07111b;
+  --bg-2: #132435;
+  --card: rgba(10, 22, 35, 0.84);
+  --card-strong: rgba(15, 32, 49, 0.96);
+  --fg: #f3f6f9;
+  --muted: #9db0c2;
+  --line: rgba(152, 179, 204, 0.18);
+  --accent: #47c0ff;
+  --accent-2: #ff8a4c;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
 }
 body.theme-light {
-  --bg: #f4f7fb;
-  --bg-2: #eaf1f9;
-  --card: #ffffff;
-  --fg: #1d2733;
-  --muted: #5a6a7c;
-  --line: #d8e0ea;
+  --bg: #f2f6fb;
+  --bg-2: #dce8f6;
+  --card: rgba(255, 255, 255, 0.82);
+  --card-strong: rgba(255, 255, 255, 0.96);
+  --fg: #1f2937;
+  --muted: #617385;
+  --line: rgba(105, 126, 149, 0.22);
+  --accent: #0a84c6;
+  --accent-2: #df6b31;
+  --shadow: 0 18px 60px rgba(71, 96, 122, 0.18);
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   color: var(--fg);
-  background: radial-gradient(circle at top left, var(--bg-2), var(--bg));
+  background:
+    radial-gradient(circle at top left, rgba(71, 192, 255, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(255, 138, 76, 0.12), transparent 24%),
+    linear-gradient(180deg, var(--bg-2), var(--bg));
+  min-height: 100vh;
 }
-main {
+.dashboard-shell {
   max-width: 1100px;
   margin: 0 auto;
   padding: 24px;
 }
 .topbar {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 14px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 18px 24px;
+  margin-bottom: 16px;
 }
-h1 { margin: 0 0 6px 0; font-size: 2rem; }
-#status { margin: 0; color: var(--muted); }
+.title-block {
+  min-width: 0;
+}
+.eyebrow,
+.panel-kicker {
+  margin: 0 0 6px 0;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+h1 {
+  margin: 0 0 8px 0;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 0.98;
+}
+h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+#status {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.35;
+  font-size: 0.92rem;
+  max-width: 72rem;
+  text-wrap: balance;
+}
 .controls {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: stretch;
+  justify-content: flex-end;
+  gap: 10px;
   color: var(--muted);
+  flex-wrap: wrap;
+  width: fit-content;
+  max-width: 100%;
 }
-.controls label { font-size: 0.9rem; }
+.control-field,
+.control-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.control-field {
+  flex-direction: column;
+  min-width: 140px;
+}
+.control-actions {
+  align-items: flex-end;
+}
+.controls label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
 .controls select,
 .controls button {
   border: 1px solid var(--line);
-  background: var(--card);
+  background: var(--card-strong);
   color: var(--fg);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 0.9rem;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  min-height: 44px;
+  backdrop-filter: blur(14px);
 }
 .controls button {
   cursor: pointer;
-  width: 36px;
-  font-size: 1rem;
+  min-width: 84px;
+  font-weight: 700;
 }
-#chart {
+.panel {
   background: var(--card);
   border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 0 20px;
+}
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+.toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--card-strong);
+  color: var(--fg);
   border-radius: 12px;
-  margin-top: 12px;
-  min-height: 520px;
+  padding: 10px 12px;
+  min-height: 40px;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+.toggle-chip input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.toggle-chip.is-disabled {
+  opacity: 0.68;
+}
+.toggle-chip.is-blocked {
+  opacity: 0.68;
+  color: var(--muted);
+}
+.panel-actions button,
+.alert-control input,
+.alert-control button {
+  border: 1px solid var(--line);
+  background: var(--card-strong);
+  color: var(--fg);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  min-height: 40px;
+}
+.panel-actions button,
+.alert-control button {
+  cursor: pointer;
+  font-weight: 700;
+}
+.panel-actions button:disabled,
+.controls button:disabled,
+.alert-control button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  color: var(--muted);
+  border-color: var(--line);
+  box-shadow: none;
+}
+#save-alert-status {
+  min-height: 1.2rem;
+  font-size: 0.84rem;
+}
+.alert-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.alert-control input[type="number"] {
+  width: 88px;
+}
+.alert-control label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+.alert-control input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+.chart-panel {
+  overflow: hidden;
+  position: relative;
+}
+#chart {
+  min-height: clamp(320px, 58vh, 560px);
+  padding: 4px 6px 0 6px;
+}
+.burn-panel {
+  margin-top: 14px;
+}
+.burn-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  /* Matches .panel-header's horizontal padding so each chart title lines up
+     with the panel heading above it. */
+  padding: 0 20px;
+}
+.burn-chart-title {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 4px 0 0 0;
+}
+.burn-now {
+  color: var(--fg);
+  font-weight: 600;
+  margin-left: 6px;
+}
+#burn-chart-session,
+#burn-chart-weekly {
+  min-height: clamp(160px, 26vh, 260px);
+  padding: 2px 0 0 0;
+}
+.chart-loading {
+  position: absolute;
+  inset: 70px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  background: linear-gradient(180deg, rgba(7, 17, 27, 0.08), rgba(7, 17, 27, 0.18));
+  backdrop-filter: blur(2px);
+  z-index: 2;
+  transition: opacity 0.2s ease;
+}
+.chart-loading.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.chart-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.14);
+  border-top-color: var(--accent);
+  animation: chart-spin 0.9s linear infinite;
+}
+@keyframes chart-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 #summary-wrap {
-  margin-top: 12px;
+  margin-top: 14px;
+  overflow: hidden;
 }
 #summary-table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  overflow: hidden;
+  background: transparent;
 }
 #summary-table th,
 #summary-table td {
   text-align: left;
-  padding: 10px 12px;
+  padding: 14px 20px;
   border-bottom: 1px solid var(--line);
 }
 #summary-table th {
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.84rem;
   font-weight: 700;
 }
 #summary-table td { font-weight: 600; }
+#summary-table td[data-cell="metric"] {
+  font-weight: 700;
+}
+#summary-table td[data-cell="expected"] {
+  color: var(--muted);
+  font-weight: 500;
+}
+#summary-table th:nth-child(6),
+#summary-table td:nth-child(6) {
+  border-left: 1px solid var(--line);
+}
 #summary-table tbody tr:last-child td { border-bottom: none; }
+@media (max-width: 720px) {
+  .dashboard-shell {
+    padding: 14px;
+  }
+  .topbar {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .controls {
+    justify-content: stretch;
+    max-width: none;
+  }
+  .control-field,
+  .control-actions {
+    flex: 1 1 100%;
+  }
+  .control-actions {
+    gap: 10px;
+  }
+  .control-actions button {
+    flex: 1 1 0;
+  }
+  .panel-header {
+    padding: 16px 16px 0 16px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .panel-actions {
+    justify-content: space-between;
+  }
+  #chart {
+    min-height: min(60vh, 420px);
+    padding: 0;
+  }
+  .burn-charts {
+    grid-template-columns: 1fr;
+    padding: 0 16px;
+  }
+  .chart-loading {
+    inset: 62px 0 0 0;
+  }
+  #summary-table thead {
+    display: none;
+  }
+  #summary-table,
+  #summary-table tbody,
+  #summary-table tr,
+  #summary-table td {
+    display: block;
+    width: 100%;
+  }
+  #summary-table tbody {
+    padding: 8px;
+  }
+  #summary-table tr {
+    background: var(--card-strong);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  #summary-table td {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 14px;
+  }
+  #summary-table td[data-cell="metric"] {
+    padding: 14px 14px 10px 14px;
+    font-size: 1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  #summary-table td:last-child {
+    border-bottom: none;
+  }
+  #summary-table td.cell-hidden {
+    display: none;
+  }
+  #summary-table td:nth-child(6) {
+    border-left: none;
+  }
+  #summary-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  #summary-table td[data-cell="metric"]::before {
+    content: none;
+  }
+}
 """
+
+
+def _favicon_svg() -> str:
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="hsl(14.8, 63.1%, 59.6%)">
+  <path style="fill:#ffffff;stroke-width:3.56787" d="m 5.005859,5 v 95 H 9.9999996 100 V 95.005859 H 9.9999996 V 5 Z"/>
+  <path style="fill:#000000;stroke-width:3.56787" d="M 0 0 L 0 95 L 4.9941406 95 L 94.994141 95 L 94.994141 90.005859 L 4.9941406 90.005859 L 4.9941406 0 L 0 0 z"/>
+  <path style="stroke-width:0.9" d="m 22.635,64.85 17.73,-9.9 0.27,-0.9 -0.27,-0.45 h -0.9 l -2.97,-0.18 -10.08,-0.27 -8.82,-0.45 -8.55,-0.45 -2.16,-0.45 -1.89,-2.7 0.18,-1.35 1.8,-1.17 2.61,0.18 5.67,0.45 8.55,0.54 6.21,0.36 9.18,1.08 h 1.44 l 0.18,-0.63 -0.45,-0.36 -0.36,-0.36 -8.91,-5.94 -9.54,-6.3 -5.04,-3.69 -2.7,-1.8 -1.35,-1.8 -0.54,-3.78 2.43,-2.7 3.33,0.27 0.81,0.18 3.33,2.61 7.2,5.49 9.27,7.02 1.35,1.08 0.54,-0.36 0.09,-0.27 -0.63,-0.99 -4.95,-9.36 -5.4,-9.36 -2.43,-3.87 -0.63,-2.34 c -0.27,-0.9 -0.36,-1.8 -0.36,-2.7 l 2.7,-3.78 1.62,-0.45 3.78,0.54 1.44,1.26 2.34,5.4 3.69,8.37 5.85,11.34 1.8,3.42 0.9,3.06 0.27,0.9 h 0.63 v -0.45 l 0.45,-6.48 0.9,-7.83 0.9,-10.08 0.27,-2.88 1.44,-3.42 2.7,-1.8 2.34,0.99 1.8,2.61 -0.27,1.62 -0.99,6.93 -2.34,10.89 -1.35,7.38 h 0.81 l 0.9,-0.99 3.69,-4.86 6.21,-7.74 2.7,-3.15 3.24,-3.33 2.07,-1.62 h 3.87 l 2.79,4.23 -1.26,4.41 -3.96,5.04 -3.33,4.23 -4.77,6.39 -2.88,5.13 0.27,0.36 h 0.63 l 10.8,-2.34 5.76,-0.99 6.84,-1.17 3.15,1.44 0.36,1.44 -1.26,3.06 -7.38,1.8 -8.64,1.8 -12.87,2.97 -0.18,0.09 0.18,0.27 5.76,0.54 2.52,0.18 h 6.12 l 11.34,0.9 2.97,1.8 1.71,2.43 -0.27,1.8 -4.59,2.34 -6.12,-1.44 -14.4,-3.42 -4.86,-1.17 h -0.72 v 0.36 l 4.14,4.05 7.47,6.75 9.54,8.73 0.45,2.16 -1.17,1.8 -1.26,-0.18 -8.28,-6.3 -3.24,-2.7 -7.2,-6.12 h -0.45 v 0.63 l 1.62,2.43 8.82,13.23 0.45,4.05 -0.63,1.26 -2.34,0.9 -2.43,-0.54 -5.22,-7.2 -5.4,-8.1 -4.23,-7.38 -0.45,0.36 -2.61,27.18 -1.17,1.35 -2.7,1.08 -2.25,-1.8 -1.26,-2.7 1.26,-5.58 1.44,-7.2 1.17,-5.76 1.08,-7.11 0.63,-2.34 v -0.18 h -0.63 l -5.4,7.47 -8.1,11.07 -6.48,6.84 -1.53,0.63 -2.7,-1.35 0.27,-2.52 1.44,-2.07 9,-11.52 5.4,-7.11 3.6,-4.14 -0.09,-0.45 h -0.27 l -23.76,15.48 -4.23,0.54 -1.8,-1.8 0.18,-2.7 0.9,-0.9 7.2,-4.95 z"/>
+  <path style="fill:#00d400" d="M 100 16.845703 L 86.900391 37.552734 L 74.015625 29.794922 L 52.158203 53.597656 L 40.197266 45.044922 L 24.507812 67.855469 L 15.025391 57.677734 L 0 72.589844 L 0 79.634766 L 14.884766 64.863281 L 25.097656 75.824219 L 41.431641 52.074219 L 52.847656 60.238281 L 74.935547 36.185547 L 88.509766 44.357422 L 100 26.199219 L 100 16.845703 z"/>
+</svg>"""
 
 
 def _app_js(
@@ -270,24 +958,55 @@ def _app_js(
     expected_weekly_line_enabled: bool,
     expected_active_start_hhmm: str,
     expected_active_end_hhmm: str,
+    notify_session_threshold_pct: float | None,
+    notify_weekly_threshold_pct: float | None,
+    notify_extra_threshold_pct: float | None,
+    notify_scoped_threshold_pct: float | None,
+    notify_expected_weekly_overrun_enabled: bool,
+    notify_expected_scoped_overrun_enabled: bool,
+    notify_expected_session_overrun_enabled: bool,
 ) -> str:
     poll_ms = poll_interval_seconds * 1000
     js = """
 const chartEl = document.getElementById('chart');
+const burnChartSessionEl = document.getElementById('burn-chart-session');
+const burnChartWeeklyEl = document.getElementById('burn-chart-weekly');
+const burnSessionNowEl = document.getElementById('burn-session-now');
+const burnWeeklyNowEl = document.getElementById('burn-weekly-now');
+const chartLoadingEl = document.getElementById('chart-loading');
 const statusEl = document.getElementById('status');
 const summaryBodyEl = document.getElementById('summary-body');
 const viewModeEl = document.getElementById('view-mode');
 const rangePresetEl = document.getElementById('range-preset');
+const notificationsToggleEl = document.getElementById('notifications-toggle');
+const notificationsToggleWrapEl = document.getElementById('notifications-toggle-wrap');
+const notificationsToggleTextEl = document.getElementById('notifications-toggle-text');
+const saveAlertSettingsEl = document.getElementById('save-alert-settings');
+const saveAlertStatusEl = document.getElementById('save-alert-status');
 const yResetEl = document.getElementById('y-reset');
 const themeToggleEl = document.getElementById('theme-toggle');
 
 const expectedLineEnabled = __EXPECTED_LINE_ENABLED__;
+const BURN_WINDOW_MINUTES = __BURN_WINDOW_MINUTES__;
+const RESIZE_DEBOUNCE_MS = 150;
 const expectedActiveStart = '__EXPECTED_ACTIVE_START__';
 const expectedActiveEnd = '__EXPECTED_ACTIVE_END__';
+let notifySessionThresholdPct = __NOTIFY_SESSION_THRESHOLD_PCT__;
+let notifyWeeklyThresholdPct = __NOTIFY_WEEKLY_THRESHOLD_PCT__;
+let notifyExtraThresholdPct = __NOTIFY_EXTRA_THRESHOLD_PCT__;
+let notifyScopedThresholdPct = __NOTIFY_SCOPED_THRESHOLD_PCT__;
+let notifyExpectedWeeklyOverrunEnabled = __NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__;
+let notifyExpectedScopedOverrunEnabled = __NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED__;
+let notifyExpectedSessionOverrunEnabled = __NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__;
 
 let hasInitializedXRange = false;
-let hasBoundRelayout = false;
+let hasBoundChartEvents = false;
 let userXRange = null;
+let currentTotalSamples = 0;
+let alertSettingsDirty = false;
+let saveAlertStatusTimer = null;
+let hasLoadedInitialData = false;
+let alertsEnabled = storageGet('tracker_alerts_enabled', 'false') === 'true';
 
 
 function storageGet(key, fallback) {
@@ -307,10 +1026,30 @@ function storageSet(key, value) {
   }
 }
 
+function storageGetJson(key, fallback) {
+  const raw = storageGet(key, null);
+  if (raw === null) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
 let currentRows = [];
 let viewMode = storageGet('tracker_view_mode', 'raw');
 let rangePreset = storageGet('tracker_range_preset', 'weekly_cycle');
 let themeMode = storageGet('tracker_theme_mode', 'dark');
+let dataRangePreset = (rangePreset === 'manual') ? 'weekly_cycle' : rangePreset;
+let alertSettingsDraft = {
+  session_threshold_pct: notifySessionThresholdPct,
+  weekly_threshold_pct: notifyWeeklyThresholdPct,
+  extra_threshold_pct: notifyExtraThresholdPct,
+  scoped_threshold_pct: notifyScopedThresholdPct,
+  expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
+  expected_scoped_overrun_enabled: notifyExpectedScopedOverrunEnabled,
+  expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
+};
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -333,6 +1072,130 @@ function formatLocalDateTimeFull(rawTs) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+function thresholdsConfigured() {
+  return (
+    notifySessionThresholdPct !== null ||
+    notifyWeeklyThresholdPct !== null ||
+    notifyExtraThresholdPct !== null ||
+    notifyExpectedWeeklyOverrunEnabled
+  );
+}
+
+function notificationsSupported() {
+  return typeof window !== 'undefined' && 'Notification' in window;
+}
+
+function updateNotificationsToggle() {
+  if (!notificationsSupported()) {
+    notificationsToggleWrapEl.hidden = true;
+    return;
+  }
+  notificationsToggleWrapEl.hidden = false;
+  notificationsToggleWrapEl.classList.remove('is-disabled', 'is-blocked');
+  if (Notification.permission === 'granted') {
+    notificationsToggleEl.disabled = false;
+    notificationsToggleEl.checked = alertsEnabled;
+    notificationsToggleTextEl.textContent = 'Alerts enabled';
+    if (!alertsEnabled) {
+      notificationsToggleWrapEl.classList.add('is-disabled');
+    }
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    notificationsToggleEl.checked = false;
+    notificationsToggleEl.disabled = true;
+    notificationsToggleTextEl.textContent = 'Alerts blocked';
+    notificationsToggleWrapEl.classList.add('is-blocked');
+    return;
+  }
+  notificationsToggleEl.checked = false;
+  notificationsToggleEl.disabled = false;
+  notificationsToggleTextEl.textContent = thresholdsConfigured() ? 'Alerts enabled' : 'Alerts enabled';
+  notificationsToggleWrapEl.classList.add('is-disabled');
+}
+
+function setSaveAlertStatus(message, isError = false) {
+  if (saveAlertStatusTimer) {
+    clearTimeout(saveAlertStatusTimer);
+    saveAlertStatusTimer = null;
+  }
+  saveAlertStatusEl.textContent = message;
+  saveAlertStatusEl.style.color = isError ? 'var(--accent-2)' : 'var(--muted)';
+}
+
+function setChartLoading(isLoading) {
+  if (!chartLoadingEl) return;
+  chartLoadingEl.classList.toggle('hidden', !isLoading);
+}
+
+function rerenderChartWithLoading(rows = currentRows) {
+  setChartLoading(true);
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      renderChart(rows);
+    });
+  });
+}
+
+function clearSaveAlertStatusLater() {
+  if (saveAlertStatusTimer) {
+    clearTimeout(saveAlertStatusTimer);
+  }
+  saveAlertStatusTimer = setTimeout(() => {
+    saveAlertStatusEl.textContent = '';
+    saveAlertStatusTimer = null;
+  }, 3500);
+}
+
+function fmtThresholdInput(value) {
+  return value === null || value === undefined || Number.isNaN(value) ? '' : String(value);
+}
+
+function syncAlertSettingsDraftFromRuntime() {
+  alertSettingsDraft = {
+    session_threshold_pct: notifySessionThresholdPct,
+    weekly_threshold_pct: notifyWeeklyThresholdPct,
+    extra_threshold_pct: notifyExtraThresholdPct,
+    scoped_threshold_pct: notifyScopedThresholdPct,
+    expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
+    expected_scoped_overrun_enabled: notifyExpectedScopedOverrunEnabled,
+    expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
+  };
+}
+
+function normalizedAlertSettingsSnapshot(settings) {
+  const normalizeThreshold = (value) => {
+    if (value === null || value === undefined || value === '') return '';
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? String(parsed) : String(value).trim();
+  };
+  return JSON.stringify({
+    session_threshold_pct: normalizeThreshold(settings.session_threshold_pct),
+    weekly_threshold_pct: normalizeThreshold(settings.weekly_threshold_pct),
+    extra_threshold_pct: normalizeThreshold(settings.extra_threshold_pct),
+    scoped_threshold_pct: normalizeThreshold(settings.scoped_threshold_pct),
+    expected_weekly_overrun_enabled: !!settings.expected_weekly_overrun_enabled,
+    expected_scoped_overrun_enabled: !!settings.expected_scoped_overrun_enabled,
+    expected_session_overrun_enabled: !!settings.expected_session_overrun_enabled
+  });
+}
+
+function refreshSaveAlertButton() {
+  const runtimeSettings = {
+    session_threshold_pct: notifySessionThresholdPct,
+    weekly_threshold_pct: notifyWeeklyThresholdPct,
+    extra_threshold_pct: notifyExtraThresholdPct,
+    scoped_threshold_pct: notifyScopedThresholdPct,
+    expected_weekly_overrun_enabled: notifyExpectedWeeklyOverrunEnabled,
+    expected_scoped_overrun_enabled: notifyExpectedScopedOverrunEnabled,
+    expected_session_overrun_enabled: notifyExpectedSessionOverrunEnabled
+  };
+  alertSettingsDirty =
+    normalizedAlertSettingsSnapshot(alertSettingsDraft) !==
+    normalizedAlertSettingsSnapshot(runtimeSettings);
+  saveAlertSettingsEl.disabled = !alertSettingsDirty;
+}
+
 function toLocalPlotTs(rawTs) {
   const d = new Date(rawTs);
   if (Number.isNaN(d.getTime())) return rawTs;
@@ -343,44 +1206,403 @@ function fmtPct(v) {
   return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + '%';
 }
 
-function renderSummaryTable(latest, expectedNowPct) {
+// The summary table is built as an innerHTML string, so any value that isn't a
+// hardcoded constant has to be escaped. row.metric is the only dynamic text
+// field: the scoped row's label comes from the API's scope.model.display_name.
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderSummaryTable(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedScopedNowPct, sessionBurnNow, weeklyBurnNow) {
   const fmtReset = (rawTs) => rawTs ? formatLocalDateTime(rawTs) : '-';
+  const extraMetricLabel = latest && latest.extra_enabled === false ? 'Extra usage (disabled)' : 'Extra usage';
+
+  function makeThresholdAlert(setting, draftValue) {
+    return `<div class="alert-control">
+      <input type="number" min="0" max="100" step="0.1" placeholder="Off"
+        data-alert-setting="${setting}"
+        value="${fmtThresholdInput(draftValue)}" />
+      <span>%</span>
+    </div>`;
+  }
+
+  function makeOverrunAlert(setting, checked) {
+    return `<div class="alert-control">
+      <label>
+        <input type="checkbox" data-alert-setting="${setting}" ${checked ? 'checked' : ''} />
+        Alert
+      </label>
+    </div>`;
+  }
+
   const rows = [
-    ['Current session', fmtPct(latest ? latest.session_pct : null), fmtReset(latest ? latest.session_resets : null)],
-    ['Weekly', fmtPct(latest ? latest.weekly_pct : null), fmtReset(latest ? latest.weekly_resets : null)],
-    ['Extra usage', fmtPct(latest ? latest.extra_pct : null), ''],
-    ['Expected weekly usage (now)', fmtPct(expectedNowPct), '']
+    {
+      metric: 'Current session',
+      usage: fmtPct(latest ? latest.session_pct : null),
+      burn: sessionBurnNow ?? null,
+      reset: fmtReset(latest ? latest.session_resets : null),
+      alert: makeThresholdAlert('session_threshold_pct', alertSettingsDraft.session_threshold_pct),
+      expected: fmtPct(expectedSessionNowPct),
+      rawExpected: expectedSessionNowPct ?? null,
+      rawUsage: latest ? (latest.session_pct ?? null) : null,
+      overrunAlert: makeOverrunAlert('expected_session_overrun_enabled', alertSettingsDraft.expected_session_overrun_enabled)
+    },
+    {
+      metric: 'Weekly',
+      usage: fmtPct(latest ? latest.weekly_pct : null),
+      burn: weeklyBurnNow ?? null,
+      reset: fmtReset(latest ? latest.weekly_resets : null),
+      alert: makeThresholdAlert('weekly_threshold_pct', alertSettingsDraft.weekly_threshold_pct),
+      expected: fmtPct(expectedWeeklyNowPct),
+      rawExpected: expectedWeeklyNowPct ?? null,
+      rawUsage: latest ? (latest.weekly_pct ?? null) : null,
+      overrunAlert: makeOverrunAlert('expected_weekly_overrun_enabled', alertSettingsDraft.expected_weekly_overrun_enabled)
+    },
   ];
+
+  // Model-scoped row: only show when data is present, before Extra usage.
+  if (latest && latest.scoped_pct !== null && latest.scoped_pct !== undefined) {
+    const scopedLabel = latest.scoped_model || 'Scoped';
+    rows.push({
+      metric: `${scopedLabel} only`,
+      usage: fmtPct(latest.scoped_pct),
+      reset: fmtReset(latest.weekly_resets),
+      alert: makeThresholdAlert('scoped_threshold_pct', alertSettingsDraft.scoped_threshold_pct),
+      expected: fmtPct(expectedScopedNowPct),
+      rawExpected: expectedScopedNowPct ?? null,
+      rawUsage: latest.scoped_pct ?? null,
+      overrunAlert: makeOverrunAlert('expected_scoped_overrun_enabled', alertSettingsDraft.expected_scoped_overrun_enabled)
+    });
+  }
+
+  rows.push({
+    metric: extraMetricLabel,
+    usage: fmtPct(latest ? latest.extra_pct : null),
+    reset: '-',
+    alert: makeThresholdAlert('extra_threshold_pct', alertSettingsDraft.extra_threshold_pct),
+    expected: null,
+    overrunAlert: null
+  });
+
   summaryBodyEl.innerHTML = rows
-    .map((row) => `<tr><td>${row[0]}</td><td>${row[1]}</td><td>${row[2]}</td></tr>`)
+    .map((row) => {
+      const hasExpected = row.expected !== null;
+      const expectedOverrun = hasExpected && row.rawExpected !== null && row.rawUsage !== null && row.rawUsage > row.rawExpected;
+      const expectedStyle = expectedOverrun ? ' style="color: var(--accent-2)"' : '';
+      return `<tr>
+        <td data-cell="metric">${escapeHtml(row.metric)}</td>
+        <td data-label="Usage">${row.usage}</td>
+        <td data-label="Burn rate">${fmtBurn(row.burn)}</td>
+        <td data-cell="expected" data-label="Expected"${hasExpected ? '' : ' class="cell-hidden"'}${expectedStyle}>${hasExpected ? row.expected : ''}</td>
+        <td data-label="Resets at (Local)">${row.reset || '-'}</td>
+        <td data-label="Alert">${row.alert}</td>
+        <td data-label="Overrun alert"${hasExpected ? '' : ' class="cell-hidden"'}>${hasExpected ? row.overrunAlert : ''}</td>
+      </tr>`;
+    })
     .join('');
 }
 
-function buildShapes(rows) {
-  const shapes = [];
-  const seen = new Set();
-  rows.forEach((row) => {
-    ['session_resets', 'weekly_resets'].forEach((key) => {
-      const value = row[key];
+function notificationState() {
+  return storageGetJson('tracker_notification_state', {});
+}
+
+function setNotificationState(state) {
+  storageSet('tracker_notification_state', JSON.stringify(state));
+}
+
+function clearNotificationState() {
+  setNotificationState({});
+}
+
+function showNotification(title, body, tag) {
+  if (!notificationsSupported() || Notification.permission !== 'granted' || !alertsEnabled) return;
+  try {
+    new Notification(title, { body, tag });
+  } catch (_err) {
+    // Ignore notification delivery errors.
+  }
+}
+
+function latestExpectedNowPct(rows) {
+  const expectedData = computeExpectedWeeklyTrace(rows);
+  return expectedData ? expectedData.expectedNowPct : null;
+}
+
+function evaluateThresholdNotificationsNow() {
+  if (!currentRows.length) return;
+  const latest = currentRows[currentRows.length - 1];
+  const hasScoped = currentRows.some((r) => r.scoped_pct !== null && r.scoped_pct !== undefined);
+  const scopedExpected = hasScoped ? computeExpectedScopedTrace(currentRows) : null;
+  const sessionExpected = computeExpectedSessionTrace(currentRows);
+  maybeNotifyThresholds(
+    latest,
+    sessionExpected ? sessionExpected.expectedNowPct : null,
+    latestExpectedNowPct(currentRows),
+    scopedExpected ? scopedExpected.expectedNowPct : null
+  );
+}
+
+function maybeNotifyThresholds(latest, expectedSessionNowPct, expectedWeeklyNowPct, expectedScopedNowPct) {
+  if (!latest || !notificationsSupported() || Notification.permission !== 'granted' || !alertsEnabled) return;
+
+  const state = notificationState();
+
+  maybeNotifyThresholdCrossing(
+    state,
+    'session',
+    latest.session_pct,
+    notifySessionThresholdPct,
+    latest.session_resets || 'unknown',
+    'Claudometer: session usage alert',
+    `Current session usage reached ${fmtPct(latest.session_pct)}.`
+  );
+  maybeNotifyExpectedSessionOverrun(state, latest, expectedSessionNowPct);
+
+  maybeNotifyThresholdCrossing(
+    state,
+    'weekly',
+    latest.weekly_pct,
+    notifyWeeklyThresholdPct,
+    latest.weekly_resets || 'unknown',
+    'Claudometer: weekly usage alert',
+    `Weekly usage reached ${fmtPct(latest.weekly_pct)}.`
+  );
+
+  maybeNotifyThresholdCrossing(
+    state,
+    'extra',
+    latest.extra_pct,
+    notifyExtraThresholdPct,
+    latest.extra_monthly_limit || 'extra',
+    'Claudometer: extra usage alert',
+    `Extra usage reached ${fmtPct(latest.extra_pct)}.`
+  );
+
+  if (latest.scoped_pct !== null && latest.scoped_pct !== undefined) {
+    const scopedLabel = latest.scoped_model || 'Scoped';
+    maybeNotifyThresholdCrossing(
+      state,
+      'scoped',
+      latest.scoped_pct,
+      notifyScopedThresholdPct,
+      latest.weekly_resets || 'unknown',
+      `Claudometer: ${scopedLabel} usage alert`,
+      `${scopedLabel}-only usage reached ${fmtPct(latest.scoped_pct)}.`
+    );
+    maybeNotifyExpectedScopedOverrun(state, latest, expectedScopedNowPct);
+  }
+
+  maybeNotifyExpectedOverrun(state, latest, expectedWeeklyNowPct);
+
+  setNotificationState(state);
+}
+
+function maybeNotifyThresholdCrossing(state, key, currentValue, threshold, marker, title, bodyPrefix) {
+  if (threshold === null || currentValue === null || currentValue === undefined) return;
+  const entryKey = `${threshold}:${marker || 'unknown'}`;
+  const entry = state[key] || {};
+
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (currentValue >= threshold) {
+    if (!entry.alerted) {
+      showNotification(title, `${bodyPrefix} Threshold ${fmtPct(threshold)}.`, `${key}:${entryKey}`);
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state[key] = entry;
+}
+
+function maybeNotifyExpectedOverrun(state, latest, expectedNowPct) {
+  if (
+    !notifyExpectedWeeklyOverrunEnabled ||
+    latest.weekly_pct === null ||
+    latest.weekly_pct === undefined ||
+    expectedNowPct === null ||
+    expectedNowPct === undefined
+  ) {
+    return;
+  }
+
+  const entryKey = latest.weekly_resets || 'unknown';
+  const entry = state.expectedOverrun || {};
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (latest.weekly_pct > expectedNowPct) {
+    if (!entry.alerted) {
+      showNotification(
+        'Claudometer: weekly usage above expected',
+        `Weekly usage is ${fmtPct(latest.weekly_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
+        `expected-overrun:${entryKey}`
+      );
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state.expectedOverrun = entry;
+}
+
+function maybeNotifyExpectedSessionOverrun(state, latest, expectedNowPct) {
+  if (
+    !notifyExpectedSessionOverrunEnabled ||
+    latest.session_pct === null ||
+    latest.session_pct === undefined ||
+    expectedNowPct === null ||
+    expectedNowPct === undefined
+  ) {
+    return;
+  }
+
+  const entryKey = latest.session_resets || 'unknown';
+  const entry = state.expectedSessionOverrun || {};
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (latest.session_pct > expectedNowPct) {
+    if (!entry.alerted) {
+      showNotification(
+        'Claudometer: session usage above expected',
+        `Session usage is ${fmtPct(latest.session_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
+        `expected-session-overrun:${entryKey}`
+      );
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state.expectedSessionOverrun = entry;
+}
+
+function maybeNotifyExpectedScopedOverrun(state, latest, expectedNowPct) {
+  if (
+    !notifyExpectedScopedOverrunEnabled ||
+    latest.scoped_pct === null ||
+    latest.scoped_pct === undefined ||
+    expectedNowPct === null ||
+    expectedNowPct === undefined
+  ) {
+    return;
+  }
+
+  const scopedLabel = latest.scoped_model || 'Scoped';
+  const entryKey = latest.weekly_resets || 'unknown';
+  const entry = state.expectedScopedOverrun || {};
+  if (entry.key !== entryKey) {
+    entry.key = entryKey;
+    entry.alerted = false;
+  }
+
+  if (latest.scoped_pct > expectedNowPct) {
+    if (!entry.alerted) {
+      showNotification(
+        `Claudometer: ${scopedLabel} usage above expected`,
+        `${scopedLabel}-only usage is ${fmtPct(latest.scoped_pct)}, above the expected ${fmtPct(expectedNowPct)}.`,
+        `expected-scoped-overrun:${entryKey}`
+      );
+      entry.alerted = true;
+    }
+  } else {
+    entry.alerted = false;
+  }
+
+  state.expectedScopedOverrun = entry;
+}
+
+// Reset markers are traces rather than layout shapes so the legend can hide
+// them — Plotly's legend only ever enumerates traces. They stay at a fixed
+// position in the traces array (see buildResetTraces).
+const RESET_MARKER_SERIES = [
+  {
+    key: 'session_resets',
+    name: 'Session resets',
+    color: 'rgba(0,120,212,0.45)',
+    legendrank: 60,
+    storageKey: 'tracker_show_session_resets'
+  },
+  {
+    key: 'weekly_resets',
+    name: 'Weekly resets',
+    color: 'rgba(227,89,0,0.45)',
+    legendrank: 70,
+    storageKey: 'tracker_show_weekly_resets'
+  }
+];
+
+const resetMarkerShown = {};
+RESET_MARKER_SERIES.forEach((series) => {
+  resetMarkerShown[series.key] = storageGet(series.storageKey, 'true') !== 'false';
+});
+
+// Always returns one trace per kind, in a stable order, even when a range holds
+// no resets of that kind. Plotly matches old traces to new ones by index when
+// it restores legend toggles under uirevision, so a trace that came and went
+// would hand its remembered visibility to whichever trace took its slot.
+function buildResetTraces(rows) {
+  return RESET_MARKER_SERIES.map((series) => {
+    const seen = new Set();
+    const x = [];
+    const y = [];
+    rows.forEach((row) => {
+      const value = row[series.key];
       if (!value) return;
       const localValue = toLocalPlotTs(value);
-      if (!localValue || seen.has(key + localValue)) return;
-      seen.add(key + localValue);
-      shapes.push({
-        type: 'line',
-        x0: localValue,
-        x1: localValue,
-        y0: 0,
-        y1: 100,
-        line: {
-          color: key === 'session_resets' ? 'rgba(0,120,212,0.45)' : 'rgba(227,89,0,0.45)',
-          width: 1,
-          dash: 'dot'
-        }
-      });
+      if (!localValue || seen.has(localValue)) return;
+      seen.add(localValue);
+      // null breaks the line, so each reset draws as its own vertical segment
+      // instead of chaining into the next one.
+      x.push(localValue, localValue, null);
+      y.push(0, 100, null);
     });
+    return {
+      x,
+      y,
+      mode: 'lines',
+      name: series.name,
+      line: { color: series.color, width: 1, dash: 'dot' },
+      legendrank: series.legendrank,
+      visible: resetMarkerShown[series.key] ? true : 'legendonly',
+      hoverinfo: 'skip'
+    };
   });
-  return shapes;
+}
+
+// Legend toggles already survive refreshes via uirevision; this is what carries
+// them across a page reload.
+//
+// Read the state back off the chart rather than deriving it from the click:
+// uirevision only defends a user's toggle while the visible we supply stays put,
+// so the moment our idea of the state diverges from the chart's, the next
+// refresh overrides the user. Observing both traces after Plotly settles keeps
+// the two in step no matter how the state got there — a click, a double-click
+// (which fires legendclick twice, pre-toggle, before isolating), or an isolate
+// triggered from some other entry in the legend.
+function syncResetMarkerVisibility() {
+  RESET_MARKER_SERIES.forEach((series, index) => {
+    const trace = chartEl.data && chartEl.data[index];
+    if (!trace || trace.name !== series.name) return;
+    const shown = trace.visible !== 'legendonly';
+    resetMarkerShown[series.key] = shown;
+    storageSet(series.storageKey, shown ? 'true' : 'false');
+  });
 }
 
 function hhmmToMinutes(hhmm) {
@@ -421,6 +1643,33 @@ function expectedPctAt(ts, cycleStart, cycleEnd, startMin, endMin, totalActive) 
   if (totalActive <= 0) return null;
   const elapsed = activeMsBetween(cycleStart, ts, startMin, endMin);
   return Math.max(0, Math.min(100, (elapsed / totalActive) * 100));
+}
+
+// Expected session line: simple linear 0% → 100% over the current 5-hour window.
+// Only drawn for the latest (active) session — identified by session_resets matching
+// the most recent row. Past sessions are ignored entirely.
+function computeExpectedSessionTrace(rows) {
+  if (!expectedLineEnabled || rows.length < 1) return null;
+  const latest = rows[rows.length - 1];
+  if (!latest.session_resets) return null;
+  const cycleEnd = new Date(latest.session_resets);
+  if (Number.isNaN(cycleEnd.getTime())) return null;
+  const cycleStart = new Date(cycleEnd.getTime() - 5 * 60 * 60 * 1000);
+  const now = new Date();
+  const elapsed = Math.max(0, now.getTime() - cycleStart.getTime());
+  const total = cycleEnd.getTime() - cycleStart.getTime();
+  const nowPct = Math.max(0, Math.min(100, (elapsed / total) * 100));
+  return {
+    trace: {
+      x: [toLocalPlotTs(cycleStart.toISOString()), toLocalPlotTs(cycleEnd.toISOString())],
+      y: [0, 100],
+      mode: 'lines',
+      name: 'Expected session usage',
+      line: { color: 'rgba(31,141,235,0.45)', width: 2.0, dash: '3px,3px' },
+      hovertemplate: 'Expected session: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected session usage</extra>'
+    },
+    expectedNowPct: nowPct
+  };
 }
 
 function computeExpectedWeeklyTrace(rows) {
@@ -469,8 +1718,76 @@ function computeExpectedWeeklyTrace(rows) {
       y,
       mode: 'lines',
       name: 'Expected weekly usage',
-      line: { color: 'rgba(170,170,170,0.75)', width: 1, dash: '3px,3px' },
+      line: { color: 'rgba(170,170,170,0.75)', width: 2.0, dash: '3px,3px' },
       hovertemplate: 'Expected: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected weekly usage</extra>'
+    },
+    expectedNowPct: nowPct
+  };
+}
+
+// The visible label for the model-scoped series. The API scopes the weekly cap
+// to one model at a time (Sonnet historically, Fable now) and names it per row;
+// use the most recent non-null name, falling back to a neutral word.
+function resolveScopedModel(rows) {
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i] && rows[i].scoped_model) return rows[i].scoped_model;
+  }
+  return 'Scoped';
+}
+
+// Scoped-model expected line: same active-hours settings and weekly_resets cycle
+// (the scoped cap resets with weekly usage). Computed for the table/notifications
+// only; not added as a chart trace.
+function computeExpectedScopedTrace(rows) {
+  if (!expectedLineEnabled || rows.length < 1) return null;
+  if (!rows.some((r) => r.scoped_pct !== null && r.scoped_pct !== undefined)) return null;
+
+  const startMin = hhmmToMinutes(expectedActiveStart);
+  const endMin = hhmmToMinutes(expectedActiveEnd);
+  if (startMin === null || endMin === null || endMin <= startMin) return null;
+
+  const resetDates = Array.from(new Set(rows.map((r) => r.weekly_resets).filter(Boolean)))
+    .map((s) => new Date(s))
+    .filter((d) => !Number.isNaN(d.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (!resetDates.length) return null;
+
+  const latest = new Date(rows[rows.length - 1].ts);
+  let cycleEnd = resetDates.find((d) => d.getTime() >= latest.getTime()) || resetDates[resetDates.length - 1];
+  let prev = null;
+  for (let i = resetDates.length - 1; i >= 0; i -= 1) {
+    if (resetDates[i].getTime() < cycleEnd.getTime()) { prev = resetDates[i]; break; }
+  }
+  const cycleStart = prev || new Date(cycleEnd.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const totalActive = activeMsBetween(cycleStart, cycleEnd, startMin, endMin);
+  if (totalActive <= 0) return null;
+
+  const pointMs = new Set([cycleStart.getTime(), cycleEnd.getTime()]);
+  const cursor = new Date(cycleStart);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() <= cycleEnd.getTime()) {
+    const dayStart = cursor.getTime();
+    const aStart = dayStart + startMin * 60 * 1000;
+    const aEnd = dayStart + endMin * 60 * 1000;
+    if (aStart > cycleStart.getTime() && aStart < cycleEnd.getTime()) pointMs.add(aStart);
+    if (aEnd > cycleStart.getTime() && aEnd < cycleEnd.getTime()) pointMs.add(aEnd);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  const pointList = Array.from(pointMs).sort((a, b) => a - b);
+  const x = pointList.map((ms) => toLocalPlotTs(new Date(ms).toISOString()));
+  const y = pointList.map((ms) => expectedPctAt(new Date(ms), cycleStart, cycleEnd, startMin, endMin, totalActive));
+  const nowPct = expectedPctAt(new Date(), cycleStart, cycleEnd, startMin, endMin, totalActive);
+
+  return {
+    trace: {
+      x,
+      y,
+      mode: 'lines',
+      name: 'Expected scoped usage',
+      line: { color: 'rgba(192,132,252,0.65)', width: 2.0, dash: '3px,3px' },
+      hovertemplate: 'Expected scoped: %{y:.1f}%<br>Time: %{x|%Y-%m-%d %H:%M}<extra>Expected scoped usage</extra>'
     },
     expectedNowPct: nowPct
   };
@@ -512,6 +1829,75 @@ function seriesFor(rows, key) {
   return smoothMoving(cleanIsolated(raw), 3);
 }
 
+function maskedSeries(rows, key, predicate) {
+  const values = seriesFor(rows, key);
+  return values.map((value, index) => predicate(rows[index]) ? value : null);
+}
+
+// Burn rate: rate of utilization climb in percentage-points per hour.
+// Each output point is the time-weighted average of adjacent-sample slopes
+// within the trailing `windowMinutes`. A step where usage drops (a window
+// reset, or a downward correction) is dropped, so a reset reads as a gap
+// rather than a large negative spike. Result is aligned 1:1 with `rows`.
+//
+// `values` is the already-view-adjusted series (see seriesFor), not raw row
+// fields: an isolated spike in raw data would otherwise read as a huge slope
+// and then trip the drop check below, blanking the window on its way back down.
+function computeBurnRate(rows, values, windowMinutes = BURN_WINDOW_MINUTES) {
+  const n = rows.length;
+  const out = new Array(n).fill(null);
+  if (n < 2) return out;
+
+  const times = rows.map((r) => new Date(r.ts).getTime());
+
+  // slope[i] = %/hr for the step ending at sample i (from i-1 to i).
+  // reset[i] marks a step where usage dropped (a window reset or correction).
+  const slope = new Array(n).fill(null);
+  const reset = new Array(n).fill(false);
+  for (let i = 1; i < n; i += 1) {
+    const v0 = values[i - 1];
+    const v1 = values[i];
+    if (v0 == null || v1 == null) continue;
+    if (Number.isNaN(times[i]) || Number.isNaN(times[i - 1])) continue;
+    const dtHours = (times[i] - times[i - 1]) / 3600000;
+    if (dtHours <= 0) continue;
+    if (v1 < v0) { reset[i] = true; continue; } // no valid burn rate across a reset
+    slope[i] = (v1 - v0) / dtHours;
+  }
+
+  const windowMs = windowMinutes * 60 * 1000;
+  for (let i = 1; i < n; i += 1) {
+    if (Number.isNaN(times[i])) continue;
+    const windowStart = times[i] - windowMs;
+    let weighted = 0;
+    let weight = 0;
+    for (let j = i; j >= 1; j -= 1) {
+      if (times[j] < windowStart) break; // step ends before the trailing window
+      if (reset[j]) break; // don't average across a reset boundary
+      if (slope[j] == null) continue;
+      // Clip the step to the window so one straddling the boundary contributes
+      // only its in-window duration (e.g. a long step after sleep/pause).
+      const stepMs = times[j] - Math.max(times[j - 1], windowStart);
+      if (!(stepMs > 0)) continue;
+      weighted += slope[j] * stepMs;
+      weight += stepMs;
+    }
+    if (weight > 0) out[i] = weighted / weight;
+  }
+  return out;
+}
+
+// Current burn rate = the latest aligned point. When the most recent sample is
+// a reset, that point is null and we report "-" rather than an earlier
+// (pre-reset) slope, which would be stale.
+function currentBurn(series) {
+  return series.length ? (series[series.length - 1] ?? null) : null;
+}
+
+function fmtBurn(v) {
+  return (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1) + ' %/hr';
+}
+
 function computeRangePreset(rows, preset) {
   if (!rows.length) return null;
   const latest = new Date(rows[rows.length - 1].ts);
@@ -543,7 +1929,10 @@ function computeRangePreset(rows, preset) {
     for (let i = resets.length - 1; i >= 0; i -= 1) {
       if (resets[i].getTime() < next.getTime()) { prev = resets[i]; break; }
     }
-    const start = prev || new Date(next.getTime() - 7 * 24 * 60 * 60 * 1000);
+    // Fall back to actual first data point rather than next-7days: a plan switch
+    // mid-cycle creates a new cycle starting before the previous weekly_resets date,
+    // so next-7days would cut off the early part of the cycle.
+    const start = prev || (rows.length > 0 ? new Date(rows[0].ts) : new Date(next.getTime() - 7 * 24 * 60 * 60 * 1000));
     return [toLocalPlotTs(start.toISOString()), toLocalPlotTs(next.toISOString())];
   }
 
@@ -554,15 +1943,15 @@ function currentTheme() {
   return themeMode === 'light'
     ? {
         bodyClass: 'theme-light',
-        plotBg: '#ffffff',
-        paperBg: '#ffffff',
+        plotBg: 'rgba(255,255,255,0)',
+        paperBg: 'rgba(255,255,255,0)',
         grid: '#e1e7ef',
         fg: '#1d2733'
       }
     : {
         bodyClass: 'theme-dark',
-        plotBg: '#151922',
-        paperBg: '#151922',
+        plotBg: 'rgba(0,0,0,0)',
+        paperBg: 'rgba(0,0,0,0)',
         grid: '#2a313d',
         fg: '#f3f5f7'
       };
@@ -572,13 +1961,47 @@ function applyTheme() {
   const theme = currentTheme();
   document.body.classList.remove('theme-light', 'theme-dark');
   document.body.classList.add(theme.bodyClass);
-  themeToggleEl.textContent = themeMode === 'light' ? '🌙' : '☀';
+  themeToggleEl.textContent = themeMode === 'light' ? 'Dark' : 'Light';
+  updateNotificationsToggle();
+}
+
+function isCompactViewport() {
+  return window.matchMedia('(max-width: 720px)').matches;
+}
+
+function effectiveRangePreset() {
+  if (rangePreset === 'manual') return rangePreset;
+  if (isCompactViewport() && !storageGet('tracker_range_preset', null)) return 'today';
+  return rangePreset;
+}
+
+function backendRangePreset() {
+  const preset = effectiveRangePreset();
+  if (preset === 'manual') return dataRangePreset || 'weekly_cycle';
+  return preset;
 }
 
 
-function ensureRelayoutBinding() {
-  if (hasBoundRelayout) return;
+// The burn charts are separate Plotly plots, so a manual zoom/pan on the main
+// chart doesn't reach them. Mirror the main chart's x-range onto them from the
+// relayout handler so they stay in sync without waiting for the next refresh.
+function syncBurnChartsXRange(range) {
+  const update = range
+    ? { 'xaxis.range': range, 'xaxis.autorange': false }
+    : { 'xaxis.autorange': true };
+  [burnChartSessionEl, burnChartWeeklyEl].forEach((el) => {
+    if (el && el.data) Plotly.relayout(el, update);
+  });
+}
+
+function ensureChartBindings() {
+  if (hasBoundChartEvents) return;
   if (typeof chartEl.on !== 'function') return;
+  // restyle rather than the legend click events: those fire before the toggle
+  // they describe is applied, and a single click doesn't apply until Plotly has
+  // waited out its double-click delay. restyle is emitted once the change has
+  // actually landed, whatever the gesture behind it.
+  chartEl.on('plotly_restyle', syncResetMarkerVisibility);
   chartEl.on('plotly_relayout', (evt) => {
     if (!evt) return;
     if (evt['xaxis.range[0]'] && evt['xaxis.range[1]']) {
@@ -586,12 +2009,14 @@ function ensureRelayoutBinding() {
       rangePreset = 'manual';
       rangePresetEl.value = 'manual';
       storageSet('tracker_range_preset', rangePreset);
+      syncBurnChartsXRange(userXRange);
     }
     if (evt['xaxis.autorange'] === true) {
       userXRange = null;
+      syncBurnChartsXRange(null);
     }
   });
-  hasBoundRelayout = true;
+  hasBoundChartEvents = true;
 }
 
 function bindControls() {
@@ -600,13 +2025,14 @@ function bindControls() {
   if (!['dark','light'].includes(themeMode)) themeMode = 'dark';
 
   viewModeEl.value = viewMode;
-  rangePresetEl.value = rangePreset;
+  rangePresetEl.value = effectiveRangePreset();
   applyTheme();
+  dataRangePreset = backendRangePreset();
 
   viewModeEl.addEventListener('change', () => {
     viewMode = viewModeEl.value;
     storageSet('tracker_view_mode', viewMode);
-    renderChart(currentRows);
+    rerenderChartWithLoading(currentRows);
   });
 
   rangePresetEl.addEventListener('change', () => {
@@ -618,7 +2044,12 @@ function bindControls() {
       rangePresetEl.value = rangePreset;
       storageSet('tracker_range_preset', rangePreset);
     }
-    renderChart(currentRows);
+    if (rangePreset === 'manual') {
+      rerenderChartWithLoading(currentRows);
+      return;
+    }
+    dataRangePreset = rangePreset;
+    refreshData();
   });
 
   yResetEl.addEventListener('click', () => {
@@ -632,79 +2063,352 @@ function bindControls() {
     themeMode = themeMode === 'light' ? 'dark' : 'light';
     storageSet('tracker_theme_mode', themeMode);
     applyTheme();
-    renderChart(currentRows);
+    rerenderChartWithLoading(currentRows);
   });
 
+  notificationsToggleEl.addEventListener('change', async () => {
+    if (!notificationsSupported()) return;
+    if (Notification.permission === 'granted') {
+      const wasEnabled = alertsEnabled;
+      alertsEnabled = notificationsToggleEl.checked;
+      storageSet('tracker_alerts_enabled', alertsEnabled ? 'true' : 'false');
+      if (!wasEnabled && alertsEnabled) {
+        clearNotificationState();
+      }
+      updateNotificationsToggle();
+      if (alertsEnabled) {
+        showNotification(
+          'Claudometer alerts enabled',
+          'Browser notifications are on for this dashboard.',
+          'alerts-enabled'
+        );
+        evaluateThresholdNotificationsNow();
+      }
+      return;
+    }
+    if (!notificationsToggleEl.checked) {
+      alertsEnabled = false;
+      storageSet('tracker_alerts_enabled', 'false');
+      updateNotificationsToggle();
+      return;
+    }
+    if (Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch (_err) {
+        // Ignore permission request failures.
+      }
+    }
+    if (Notification.permission === 'granted') {
+      const wasEnabled = alertsEnabled;
+      alertsEnabled = true;
+      storageSet('tracker_alerts_enabled', 'true');
+      if (!wasEnabled) {
+        clearNotificationState();
+      }
+    } else {
+      notificationsToggleEl.checked = false;
+    }
+    updateNotificationsToggle();
+    if (Notification.permission === 'granted' && alertsEnabled) {
+      showNotification(
+        'Claudometer alerts enabled',
+        'Browser notifications are on for this dashboard.',
+        'alerts-enabled'
+      );
+      evaluateThresholdNotificationsNow();
+    }
+  });
+
+  summaryBodyEl.addEventListener('input', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const setting = target.dataset.alertSetting;
+    if (!setting) return;
+    if (target.type === 'checkbox') {
+      alertSettingsDraft[setting] = target.checked;
+    } else {
+      const raw = target.value.trim();
+      alertSettingsDraft[setting] = raw === '' ? null : raw;
+    }
+    refreshSaveAlertButton();
+    setSaveAlertStatus('Unsaved alert settings');
+  });
+
+  summaryBodyEl.addEventListener('change', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const setting = target.dataset.alertSetting;
+    if (!setting) return;
+    if (target.type === 'checkbox') {
+      alertSettingsDraft[setting] = target.checked;
+      refreshSaveAlertButton();
+      setSaveAlertStatus('Unsaved alert settings');
+    }
+  });
+
+  saveAlertSettingsEl.addEventListener('click', saveAlertSettings);
+
+}
+
+async function saveAlertSettings() {
+  saveAlertSettingsEl.disabled = true;
+  setSaveAlertStatus('Saving...');
+  try {
+    const payload = {
+      session_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.session_threshold_pct),
+      weekly_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.weekly_threshold_pct),
+      extra_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.extra_threshold_pct),
+      scoped_threshold_pct: normalizeDraftThreshold(alertSettingsDraft.scoped_threshold_pct),
+      expected_weekly_overrun_enabled: !!alertSettingsDraft.expected_weekly_overrun_enabled,
+      expected_scoped_overrun_enabled: !!alertSettingsDraft.expected_scoped_overrun_enabled,
+      expected_session_overrun_enabled: !!alertSettingsDraft.expected_session_overrun_enabled
+    };
+    const res = await fetch('/notification-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+    applyNotificationSettings(body.notification_settings, true);
+    rerenderChartWithLoading(currentRows);
+    setSaveAlertStatus('Alert settings saved');
+    clearSaveAlertStatusLater();
+  } catch (err) {
+    setSaveAlertStatus('Save failed: ' + err, true);
+  } finally {
+    refreshSaveAlertButton();
+  }
+}
+
+function normalizeDraftThreshold(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) ? parsed : rawValue;
+}
+
+function applyNotificationSettings(settings, fromSave = false) {
+  notifySessionThresholdPct = settings.session_threshold_pct ?? null;
+  notifyWeeklyThresholdPct = settings.weekly_threshold_pct ?? null;
+  notifyExtraThresholdPct = settings.extra_threshold_pct ?? null;
+  notifyScopedThresholdPct = settings.scoped_threshold_pct ?? null;
+  notifyExpectedWeeklyOverrunEnabled = !!settings.expected_weekly_overrun_enabled;
+  notifyExpectedScopedOverrunEnabled = !!settings.expected_scoped_overrun_enabled;
+  notifyExpectedSessionOverrunEnabled = !!settings.expected_session_overrun_enabled;
+  if (!alertSettingsDirty || fromSave) {
+    syncAlertSettingsDraftFromRuntime();
+  }
+  if (fromSave) {
+    alertSettingsDirty = false;
+  }
+  updateNotificationsToggle();
+  refreshSaveAlertButton();
+  if (fromSave && Notification.permission === 'granted') {
+    evaluateThresholdNotificationsNow();
+  }
+}
+
+function burnLayout(xaxisLayout) {
+  const theme = currentTheme();
+  const compact = isCompactViewport();
+  return {
+    title: null,
+    uirevision: 'keep-zoom',
+    paper_bgcolor: theme.paperBg,
+    plot_bgcolor: theme.plotBg,
+    font: { color: theme.fg },
+    // These charts are ~half the width of the main one, so the inherited
+    // '%Y-%m-%d %H:%M' ticks rotate steeply and eat the plot area. Drop the
+    // year (the main chart directly above carries it) and let automargin size
+    // the bottom margin from the rendered labels instead of a fixed guess.
+    xaxis: Object.assign({}, xaxisLayout, {
+      title: null,
+      tickformat: '%m-%d %H:%M',
+      automargin: true
+    }),
+    yaxis: { title: compact ? null : '%/hr', rangemode: 'tozero', gridcolor: theme.grid, automargin: true },
+    margin: compact ? { t: 8, r: 18, b: 40, l: 46 } : { t: 10, r: 30, b: 48, l: 56 },
+    showlegend: false
+  };
+}
+
+function renderBurnChart(el, x, y, color, xaxisLayout) {
+  const compact = isCompactViewport();
+  Plotly.react(el, [{
+    x,
+    y,
+    mode: 'lines',
+    line: { color, width: compact ? 1.6 : 2.2 },
+    connectgaps: false,
+    cliponaxis: false,
+    hovertemplate: '%{y:.2f} %/hr<extra></extra>'
+  }], burnLayout(xaxisLayout), { responsive: true });
+}
+
+function renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout) {
+  if (!rows.length) {
+    Plotly.react(burnChartSessionEl, [], burnLayout(null), { responsive: true });
+    Plotly.react(burnChartWeeklyEl, [], burnLayout(null), { responsive: true });
+    burnSessionNowEl.textContent = '-';
+    burnWeeklyNowEl.textContent = '-';
+    return;
+  }
+  const x = rows.map((r) => toLocalPlotTs(r.ts));
+  renderBurnChart(burnChartSessionEl, x, sessionBurnSeries, '#1f8deb', xaxisLayout);
+  renderBurnChart(burnChartWeeklyEl, x, weeklyBurnSeries, '#ff6a2b', xaxisLayout);
+  burnSessionNowEl.textContent = fmtBurn(currentBurn(sessionBurnSeries));
+  burnWeeklyNowEl.textContent = fmtBurn(currentBurn(weeklyBurnSeries));
 }
 
 function renderChart(rows) {
   const theme = currentTheme();
+  const compact = isCompactViewport();
+  const activeRangePreset = effectiveRangePreset();
+  const lineWidth = compact ? 1.6 : 2.5;
+  const markerSize = compact ? 2.5 : 4;
+  rangePresetEl.value = activeRangePreset;
 
   if (!rows.length) {
-    Plotly.newPlot(chartEl, [], {
+    // react, not newPlot: newPlot purges the div, and purging drops every
+    // handler ensureChartBindings installed — which its own guard then refuses
+    // to reinstall. An empty DB would otherwise cost us the legend and zoom
+    // handlers for the rest of the session, even once samples start arriving.
+    Plotly.react(chartEl, [], {
       title: null,
       uirevision: 'keep-zoom',
       paper_bgcolor: theme.paperBg,
       plot_bgcolor: theme.plotBg,
       font: { color: theme.fg },
-      xaxis: { title: 'Time (Local)', tickformat: '%Y-%m-%d %H:%M', hoverformat: '%Y-%m-%d %H:%M', gridcolor: theme.grid },
-      yaxis: { title: 'Utilization (%)', range: [0, 102], gridcolor: theme.grid }
+      xaxis: { title: compact ? null : 'Time (Local)', tickformat: '%Y-%m-%d %H:%M', hoverformat: '%Y-%m-%d %H:%M', gridcolor: theme.grid },
+      yaxis: { title: compact ? null : 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
+      margin: compact ? { t: 20, r: 18, b: 48, l: 42 } : { t: 24, r: 30, b: 72, l: 60 }
     }, { responsive: true });
-    ensureRelayoutBinding();
-    renderSummaryTable(null, null);
+    ensureChartBindings();
+    renderSummaryTable(null, null, null, null, null, null);
+    renderBurnCharts([], [], [], null);
+    setChartLoading(false);
     return;
   }
 
   const x = rows.map((r) => toLocalPlotTs(r.ts));
+  const hasScoped = rows.some((r) => r.scoped_pct !== null && r.scoped_pct !== undefined);
+  // Shared by the usage traces and the burn-rate charts, so both reflect the
+  // same view mode.
+  const sessionValues = seriesFor(rows, 'session_pct');
+  const weeklyValues = seriesFor(rows, 'weekly_pct');
+  // The reset traces lead the array so their indices stay put as the optional
+  // Scoped/expected traces come and go; legendrank still sinks them to the end
+  // of the legend.
   const traces = [
+    ...buildResetTraces(rows),
     {
       x,
-      y: seriesFor(rows, 'session_pct'),
-      mode: 'lines+markers',
-      name: 'Current session',
-      line: { color: '#1f8deb', width: 2.5 },
-      marker: { size: 4 },
-      cliponaxis: false
-    },
-    {
-      x,
-      y: seriesFor(rows, 'weekly_pct'),
-      mode: 'lines+markers',
-      name: 'Weekly',
-      line: { color: '#ff6a2b', width: 2.5 },
-      marker: { size: 4 },
-      cliponaxis: false
-    },
-    {
-      x,
-      y: seriesFor(rows, 'extra_pct'),
+      y: maskedSeries(rows, 'extra_pct', (row) => row.extra_enabled !== false),
       mode: 'lines+markers',
       name: 'Extra usage',
-      line: { color: '#1db6a3', width: 2.5 },
-      marker: { size: 4 },
+      line: { color: '#1db6a3', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 30,
+      cliponaxis: false
+    },
+    {
+      x,
+      y: maskedSeries(rows, 'extra_pct', (row) => row.extra_enabled === false),
+      mode: 'lines+markers',
+      name: 'Extra usage (disabled)',
+      line: { color: '#0f5f50', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 40,
+      cliponaxis: false
+    },
+    {
+      x,
+      y: sessionValues,
+      mode: 'lines+markers',
+      name: 'Current session',
+      line: { color: '#1f8deb', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 10,
+      cliponaxis: false
+    },
+    {
+      x,
+      y: weeklyValues,
+      mode: 'lines+markers',
+      name: 'Weekly',
+      line: { color: '#ff6a2b', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 20,
       cliponaxis: false
     }
   ];
 
+  if (hasScoped) {
+    traces.push({
+      x,
+      y: seriesFor(rows, 'scoped_pct'),
+      mode: 'lines+markers',
+      name: `${resolveScopedModel(rows)} only`,
+      line: { color: '#c084fc', width: lineWidth },
+      marker: { size: markerSize },
+      legendrank: 25,
+      cliponaxis: false
+    });
+  }
+
   const expectedData = computeExpectedWeeklyTrace(rows);
-  if (expectedData) traces.push(expectedData.trace);
+  if (expectedData) {
+    expectedData.trace.legendrank = 50;
+    traces.push(expectedData.trace);
+  }
+
+  // Scoped expected line is identical to the weekly expected line, so we only
+  // compute it for the table/notifications — no separate chart trace needed.
+  const expectedScopedData = hasScoped ? computeExpectedScopedTrace(rows) : null;
+
+  const expectedSessionData = computeExpectedSessionTrace(rows);
+  if (expectedSessionData) {
+    expectedSessionData.trace.legendrank = 5;
+    traces.push(expectedSessionData.trace);
+  }
 
   const latest = rows[rows.length - 1];
-  statusEl.textContent = 'Samples: ' + rows.length + ' | Last sample (Local): ' + formatLocalDateTimeFull(latest.ts);
-  renderSummaryTable(latest, expectedData ? expectedData.expectedNowPct : null);
+  const sessionBurnSeries = computeBurnRate(rows, sessionValues);
+  const weeklyBurnSeries = computeBurnRate(rows, weeklyValues);
+  statusEl.textContent =
+    'Samples: ' + currentTotalSamples +
+    ' | Polling interval: __POLL_INTERVAL_SECONDS__s' +
+    ' | Last sample: ' + formatLocalDateTimeFull(latest.ts);
+  renderSummaryTable(
+    latest,
+    expectedSessionData ? expectedSessionData.expectedNowPct : null,
+    expectedData ? expectedData.expectedNowPct : null,
+    expectedScopedData ? expectedScopedData.expectedNowPct : null,
+    currentBurn(sessionBurnSeries),
+    currentBurn(weeklyBurnSeries)
+  );
+  maybeNotifyThresholds(
+    latest,
+    expectedSessionData ? expectedSessionData.expectedNowPct : null,
+    expectedData ? expectedData.expectedNowPct : null,
+    expectedScopedData ? expectedScopedData.expectedNowPct : null
+  );
 
   const xaxisLayout = {
-    title: 'Time (Local)',
+    title: compact ? null : 'Time (Local)',
     tickformat: '%Y-%m-%d %H:%M',
     hoverformat: '%Y-%m-%d %H:%M',
     gridcolor: theme.grid
   };
 
-  if (rangePreset === 'manual' && userXRange) {
+  if (activeRangePreset === 'manual' && userXRange) {
     xaxisLayout.range = userXRange;
     xaxisLayout.autorange = false;
   } else {
-    const presetRange = computeRangePreset(rows, rangePreset);
+    const presetRange = computeRangePreset(rows, activeRangePreset);
     if (presetRange) {
       xaxisLayout.range = presetRange;
       xaxisLayout.autorange = false;
@@ -718,24 +2422,36 @@ function renderChart(rows) {
     plot_bgcolor: theme.plotBg,
     font: { color: theme.fg },
     xaxis: xaxisLayout,
-    yaxis: { title: 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
-    shapes: buildShapes(rows),
-    margin: { t: 50, r: 30, b: 100, l: 60 },
-    legend: { orientation: 'h', y: -0.18, yanchor: 'top' }
+    yaxis: { title: compact ? null : 'Utilization (%)', range: [0, 102], gridcolor: theme.grid },
+    margin: compact ? { t: 20, r: 18, b: 88, l: 42 } : { t: 28, r: 30, b: 100, l: 60 },
+    legend: compact
+      ? { orientation: 'h', y: -0.28, yanchor: 'top', x: 0, font: { size: 11 }, traceorder: 'normal' }
+      : { orientation: 'h', y: -0.18, yanchor: 'top', traceorder: 'normal' }
   }, { responsive: true });
 
-  ensureRelayoutBinding();
+  renderBurnCharts(rows, sessionBurnSeries, weeklyBurnSeries, xaxisLayout);
+
+  ensureChartBindings();
   hasInitializedXRange = true;
+  hasLoadedInitialData = true;
+  setChartLoading(false);
 }
 
 async function refreshData() {
   try {
-    const res = await fetch('/data.json', { cache: 'no-store' });
+    setChartLoading(true);
+    const params = new URLSearchParams({ range: backendRangePreset() });
+    const res = await fetch('/data.json?' + params.toString(), { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const payload = await res.json();
+    if (payload.notification_settings) {
+      applyNotificationSettings(payload.notification_settings);
+    }
     currentRows = payload.rows || [];
+    currentTotalSamples = payload.total_samples || currentRows.length;
     renderChart(currentRows);
   } catch (err) {
+    setChartLoading(false);
     statusEl.textContent = 'Data fetch failed: ' + err;
   }
 }
@@ -743,11 +2459,51 @@ async function refreshData() {
 bindControls();
 renderChart([]);
 refreshData();
+// Resize fires continuously while dragging, and each re-render is a full
+// Plotly redraw. Coalesce the burst into one render.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (resizeTimer !== null) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    rerenderChartWithLoading(currentRows);
+  }, RESIZE_DEBOUNCE_MS);
+});
 setInterval(refreshData, __POLL_MS__);
 """
     return (
         js.replace("__POLL_MS__", str(poll_ms))
+        .replace("__BURN_WINDOW_MINUTES__", str(BURN_WINDOW_MINUTES))
+        .replace("__POLL_INTERVAL_SECONDS__", str(poll_interval_seconds))
         .replace("__EXPECTED_LINE_ENABLED__", "true" if expected_weekly_line_enabled else "false")
         .replace("__EXPECTED_ACTIVE_START__", expected_active_start_hhmm)
         .replace("__EXPECTED_ACTIVE_END__", expected_active_end_hhmm)
+        .replace(
+            "__NOTIFY_SESSION_THRESHOLD_PCT__",
+            "null" if notify_session_threshold_pct is None else str(float(notify_session_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_WEEKLY_THRESHOLD_PCT__",
+            "null" if notify_weekly_threshold_pct is None else str(float(notify_weekly_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_EXTRA_THRESHOLD_PCT__",
+            "null" if notify_extra_threshold_pct is None else str(float(notify_extra_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_SCOPED_THRESHOLD_PCT__",
+            "null" if notify_scoped_threshold_pct is None else str(float(notify_scoped_threshold_pct)),
+        )
+        .replace(
+            "__NOTIFY_EXPECTED_WEEKLY_OVERRUN_ENABLED__",
+            "true" if notify_expected_weekly_overrun_enabled else "false",
+        )
+        .replace(
+            "__NOTIFY_EXPECTED_SCOPED_OVERRUN_ENABLED__",
+            "true" if notify_expected_scoped_overrun_enabled else "false",
+        )
+        .replace(
+            "__NOTIFY_EXPECTED_SESSION_OVERRUN_ENABLED__",
+            "true" if notify_expected_session_overrun_enabled else "false",
+        )
     )
